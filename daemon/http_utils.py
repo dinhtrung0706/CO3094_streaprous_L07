@@ -38,7 +38,11 @@ def is_json_request(request):
     path = getattr(request, "path", "") or ""
     headers = getattr(request, "headers", {}) or {}
     accept = headers.get("Accept", headers.get("accept", "")) or ""
-    return path.startswith("/api/") or "json" in str(accept).lower()
+    return (
+        path == "/api"
+        or path.startswith("/api/")
+        or "json" in str(accept).lower()
+    )
 
 
 def to_bytes(value, charset="utf-8"):

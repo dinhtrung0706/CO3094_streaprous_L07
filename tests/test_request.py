@@ -64,7 +64,7 @@ class RequestLineTests(unittest.TestCase):
     def test_each_parse_gets_a_new_request_id_and_clears_user(self):
         request = Request()
         first = request.prepare(build_request("GET", "/x")).request_id
-        request.user = object()
+        request.user = object()  # type: ignore[assignment]
         second = request.prepare(build_request("GET", "/x")).request_id
         self.assertNotEqual(first, second)
         self.assertIsNone(request.user)

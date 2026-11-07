@@ -39,7 +39,7 @@ def login(headers="guest", body="anonymous"):
     :param headers (str): The request headers or user identifier.
     :param body (str): The request body or login payload.
     """
-    print("[SampleApp] Logging in {} to {}".format(headers, body))
+    print(f"[SampleApp] Logging in {headers} to {body}")
     data = {"message": "Welcome to the RESTful TCP WebApp"}
 
     # Convert to JSON string
@@ -48,7 +48,7 @@ def login(headers="guest", body="anonymous"):
 
 @app.route("/echo", methods=["POST"])
 def echo(headers="guest", body="anonymous"):
-    print("[SampleApp] received body {}".format(body))
+    print(f"[SampleApp] received body {body}")
 
     try:
         message = json.loads(body)

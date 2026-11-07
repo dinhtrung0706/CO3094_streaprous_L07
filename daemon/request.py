@@ -179,7 +179,7 @@ class Request:
     pieces used by streaming adapters.
     """
 
-    __attrs__ = [
+    __attrs__ = [  # noqa: RUF012
         "method",
         "target",
         "url",
