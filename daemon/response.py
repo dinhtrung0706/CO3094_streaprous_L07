@@ -25,11 +25,17 @@ import mimetypes
 import os
 
 from .dictionary import CaseInsensitiveDict
+from .http_utils import (
+    format_http_date,
+    safe_header_value,
+    sniff_content_type,
+    to_bytes,
+)
 
 # Get the base directory of the project
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/"
 
-class Response():   
+class Response():
     """The :class:`Response <Response>` object, which contains a
     server's response to an HTTP request.
 
@@ -95,7 +101,7 @@ class Response():
         #: Case-insensitive Dictionary of Response Headers.
         #: For example, ``headers['content-type']`` will return the
         #: value of a ``'Content-Type'`` response header.
-        self.headers = {}
+        self.headers = CaseInsensitiveDict()
 
         #: URL location of Response.
         self.url = None
@@ -153,7 +159,7 @@ class Response():
 
         # Validate header attr existence
         if not hasattr(self, "headers") or self.headers is None:
-            self.headers = {}
+            self.headers = CaseInsensitiveDict()
 
         # Processing mime_type based on main_type and sub_type
         main_type, sub_type = mime_type.split('/', 1)
@@ -226,7 +232,7 @@ class Response():
         :rtypes bytes: encoded HTTP response header.
         """
         # Ensure _content is set
-        if not hasattr(self, '_content') or self._content is None:
+        if not hasattr(self, '_content') or not isinstance(self._content, (str, bytes)):
             self._content = b""
         
         content_length = len(self._content)
@@ -234,9 +240,9 @@ class Response():
         # Build response headers (not request headers!)
         headers = {
             "Cache-Control": "no-cache",
-            "Content-Type": "{}".format(self.headers.get('Content-Type', 'text/html')),
+            "Content-Type": self.headers.get('Content-Type', sniff_content_type(self._content)),
             "Content-Length": "{}".format(content_length),
-            "Date": "{}".format(datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")),
+            "Date": format_http_date(datetime.datetime.now(datetime.timezone.utc).timestamp()),
             "Connection": "close",
             "Server": "Streaprous/1.0",
         }
@@ -245,10 +251,10 @@ class Response():
         status_line = "HTTP/1.1 200 OK\r\n"
         header_lines = []
         for key, value in headers.items():
-            header_lines.append("{}: {}".format(key, value))
+            header_lines.append("{}: {}".format(key, safe_header_value(value)))
         header_str = status_line + "\r\n".join(header_lines) + "\r\n\r\n"
         
-        return header_str.encode('utf-8')
+        return to_bytes(header_str, "utf-8")
 
 
     def build_notfound(self):

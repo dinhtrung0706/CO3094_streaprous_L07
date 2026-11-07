@@ -18,9 +18,10 @@ This module provides a Request object to manage and persist
 request settings (cookies, auth, proxies).
 """
 from .dictionary import CaseInsensitiveDict
+from .http_utils import normalize_path, safe_header_value
 
 
-class Request():
+class Request:
     """The fully mutable "class" `Request <Request>` object,
     containing the exact bytes that will be sent to the server.
 
@@ -78,22 +79,23 @@ class Request():
             lines = request.splitlines()
             first_line = lines[0]
             method, path, version = first_line.split()
-
-            if path == '/':
-                path = '/index.html'
         except Exception:
-            return None, None
+            return None, None, None
+
+        path = normalize_path(path)
+        if path == '/':
+            path = '/index.html'
 
         return method, path, version
              
     def prepare_headers(self, request):
         """Prepares the given HTTP headers."""
         lines = request.split('\r\n')
-        headers = {}
+        headers = CaseInsensitiveDict()
         for line in lines[1:]:
-            if ': ' in line:
-                key, val = line.split(': ', 1)
-                headers[key.lower()] = val
+            if ':' in line:
+                key, val = line.split(':', 1)
+                headers[key.strip()] = safe_header_value(val.strip())
         return headers
 
     def fetch_headers_body(self, request):
@@ -123,7 +125,8 @@ class Request():
         # self._raw_body =...
         # self.headers = ...
         
-        self.prepare_headers(self._raw_headers)
+        self._raw_headers, self._raw_body = self.fetch_headers_body(request)
+        self.headers = self.prepare_headers(self._raw_headers)
         print("[Request] Parsed headers: {}".format(self.headers))
 
         #

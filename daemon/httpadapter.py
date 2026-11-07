@@ -32,6 +32,7 @@ from streaprous_socket.streaprous_raw_connection import (
 )
 
 from .dictionary import CaseInsensitiveDict
+from .http_utils import to_bytes
 from .request import Request
 from .response import Response
 
@@ -187,14 +188,14 @@ class HttpAdapter:
             response = resp.build_response(req)
         
         # Send response using streaprous raw connection
-        response = response if isinstance(response, bytes) else response.encode("utf-8")
+        response = to_bytes(response, "utf-8")
         print(f"[HttpAdapter] HTTP Response ({len(response)} bytes): {response[:200]}")
         #
         # TODO run_conn_send packet
         # run_conn_send(..)
         
         # Wait longer to ensure response is transmitted, client processes it, and sends ACK
-        import time
+        # import time
         time.sleep(5.0)
         
         # Close connection with FIN packet

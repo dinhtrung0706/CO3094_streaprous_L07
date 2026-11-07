@@ -14,7 +14,7 @@ from collections.abc import MutableMapping
 
 
 class CaseInsensitiveDict(MutableMapping):
-    """The :class:`CaseInsensitiveDict<MutableMapping>` object, which 
+    """The :class:`CaseInsensitiveDict<MutableMapping>` object, which
     contains a custom behavior of MutuableMapping.
 
     Usage::
@@ -22,7 +22,7 @@ class CaseInsensitiveDict(MutableMapping):
       >>> import tools
       >>> word = CaseInsensitiveDict(status_code='404', msg="Not found")
       >>> code = word['status_code']
-      >>> code 
+      >>> code
       404
 
       >>> msg = word['msg']
@@ -35,19 +35,35 @@ class CaseInsensitiveDict(MutableMapping):
     """
 
     def __init__(self, *args, **kwargs):
-        self.store = {k.lower(): v for k, v in dict(*args, **kwargs).items()}
+        self._data = {}
+        self._display = {}
+        # Keep the former attribute as an alias for callers that used it.
+        self.store = self._data
+        self.update(*args, **kwargs)
 
     def __getitem__(self, key):
-        return self.store[key.lower()]
+        return self._data[key.lower()]
 
     def __setitem__(self, key, value):
-        self.store[key.lower()] = value
+        lower_key = key.lower()
+        if lower_key not in self._data:
+            self._display[lower_key] = key
+        self._data[lower_key] = value
 
     def __delitem__(self, key):
-        del self.store[key.lower()]
+        lower_key = key.lower()
+        del self._data[lower_key]
+        del self._display[lower_key]
 
     def __iter__(self):
-        return iter(self.store)
+        return (self._display[key] for key in self._data)
 
     def __len__(self):
-        return len(self.store)
+        return len(self._data)
+
+    def copy(self):
+        """Return an independent mapping with original key casing preserved."""
+        return type(self)(self.items())
+
+    def __repr__(self):
+        return f"{type(self).__name__}({dict(self.items())!r})"
