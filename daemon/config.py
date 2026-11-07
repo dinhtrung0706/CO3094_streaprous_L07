@@ -1,4 +1,12 @@
+"""Fixed resource limits for the HTTP server.
+
+Tests may monkey-patch these module attributes to exercise limit paths without
+allocating huge buffers.
+"""
+
 MAX_HEADER_BYTES = 64 * 1024
+MAX_HEADERS = 100
+MAX_HEADER_LINE_BYTES = 8 * 1024
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_URI_BYTES = 8 * 1024
 MAX_CHUNK_LINE_BYTES = 1024
