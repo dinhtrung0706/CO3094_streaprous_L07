@@ -35,12 +35,12 @@ Requirements:
 
 """
 
-import socket
-import threading
 import argparse
 import re
-from urllib.parse import urlparse
+import socket
+import threading
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from daemon import create_proxy
 

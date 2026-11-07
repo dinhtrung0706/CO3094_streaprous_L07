@@ -40,28 +40,27 @@ Usage Example:
 
 """
 
-import socket
-import threading
 import argparse
-
 import asyncio
 import inspect
-
-from .response import *
-from .httpadapter import HttpAdapter
-from .dictionary import CaseInsensitiveDict
+import selectors
+import socket
+import threading
 
 # Import streaprous raw connection
 from streaprous_socket.streaprous_raw_connection import (
-    create_raw_socket,
+    DEFAULT_INTERFACE_NAME,
     accept,
+    close_connection,
+    create_raw_socket,
     run_conn_recv,
     run_conn_send,
-    close_connection,
-    DEFAULT_INTERFACE_NAME
 )
 
-import selectors
+from .dictionary import CaseInsensitiveDict
+from .httpadapter import HttpAdapter
+from .response import *
+
 sel = selectors.DefaultSelector()
 
 mode_async = "callback"

@@ -17,9 +17,11 @@ deamon.streaprous
 This module provides a StreapRous object to deploy RESTful url web app with routing
 """
 
-from .backend import create_backend
 import asyncio
 import inspect
+
+from .backend import create_backend
+
 
 class StreapRous:
     """The fully mutable :class:`StreapRous <StreapRous>` object, which is a lightweight,

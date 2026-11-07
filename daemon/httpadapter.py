@@ -20,20 +20,21 @@ raw URL paths and RESTful route definitions, and integrates with
 Request and Response objects to handle client-server communication.
 """
 
-from .request import Request
-from .response import Response
-from .dictionary import CaseInsensitiveDict
-
 import asyncio
 import inspect
 import time
 
 # Import streaprous raw connection functions
 from streaprous_socket.streaprous_raw_connection import (
+    close_connection,
     run_conn_recv,
     run_conn_send,
-    close_connection
 )
+
+from .dictionary import CaseInsensitiveDict
+from .request import Request
+from .response import Response
+
 
 class HttpAdapter:
     """

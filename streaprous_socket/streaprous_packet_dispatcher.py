@@ -20,10 +20,10 @@ Each queue is identified by its key includes (client_ip, client_port).
 This module supports multiple processing flows (denoted by coonections) would call recvfrom() on the same socket.
 """
 
+import queue
 import socket
 import struct
 import threading
-import queue
 import time
 
 # Global structure for packet dispatcher

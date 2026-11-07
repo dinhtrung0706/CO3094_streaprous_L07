@@ -21,8 +21,9 @@ based on incoming requests.
 The current version supports MIME type detection, content loading and header formatting
 """
 import datetime
-import os
 import mimetypes
+import os
+
 from .dictionary import CaseInsensitiveDict
 
 # Get the base directory of the project

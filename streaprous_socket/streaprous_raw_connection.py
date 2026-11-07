@@ -19,25 +19,25 @@ Based on raw_connection_server.py implementation.
 Provides connection management, send/receive functionality using raw sockets.
 """
 
+import queue
 import socket
 import struct
 import sys
 import threading
 import time
-import queue
 from collections import namedtuple
+
 import netifaces
 
 # Import streaprout packet dispatcher functions
 from .streaprous_packet_dispatcher import (
-    start_packet_dispatcher,
-    stop_packet_dispatcher,
+    _SYN_KEY,
+    _packet_dispatcher_lock,
     get_packet_queue,
     remove_packet_queue,
-    _packet_dispatcher_lock,
-    _SYN_KEY,
+    start_packet_dispatcher,
+    stop_packet_dispatcher,
 )
-
 
 # Connection structure 
 # This structure holds connection and its state information

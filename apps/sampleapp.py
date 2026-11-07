@@ -19,12 +19,12 @@ app.sampleapp
 
 """
 
-import sys
-import os
 import importlib.util
 import json
+import os
+import sys
 
-from   daemon import StreapRous
+from daemon import StreapRous
 
 app = StreapRous()
 

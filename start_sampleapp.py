@@ -24,9 +24,9 @@ HTTP requests. The application includes a login endpoint and a greeting endpoint
 and can be configured via command-line arguments.
 """
 
+import argparse
 import json
 import socket
-import argparse
 
 from apps import create_sampleapp
 

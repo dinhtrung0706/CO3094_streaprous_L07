@@ -12,6 +12,7 @@
 
 from collections.abc import MutableMapping
 
+
 class CaseInsensitiveDict(MutableMapping):
     """The :class:`CaseInsensitiveDict<MutableMapping>` object, which 
     contains a custom behavior of MutuableMapping.

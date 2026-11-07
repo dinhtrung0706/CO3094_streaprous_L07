@@ -11,10 +11,9 @@
 #
 
 from .backend import create_backend
-from .proxy import create_proxy
-from .streaprous import StreapRous
-from .response import Response
-from .request import Request
-from .backend import create_backend
-from .httpadapter import HttpAdapter
 from .dictionary import CaseInsensitiveDict
+from .httpadapter import HttpAdapter
+from .proxy import create_proxy
+from .request import Request
+from .response import Response
+from .streaprous import StreapRous

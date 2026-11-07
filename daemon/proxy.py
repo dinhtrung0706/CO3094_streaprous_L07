@@ -29,9 +29,10 @@ Requirement:
 """
 import socket
 import threading
-from .response import *
-from .httpadapter import HttpAdapter
+
 from .dictionary import CaseInsensitiveDict
+from .httpadapter import HttpAdapter
+from .response import *
 
 #: A dictionary mapping hostnames to backend IP and port tuples.
 #: Used to determine routing targets for incoming requests.
