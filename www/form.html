@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Simple RESTful HTTP form</title>
+
+  <script>
+    async function sendEcho() {
+      const message = document.getElementById("msg").value;
+
+      // Example: POST request to /echo endpoint
+      try {
+        const response = await fetch("/echo", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ text: message })
+         });
+
+        if (!response.ok) {
+            throw new Error("HTTP error " + response.status);
+        }
+
+        const result = await response.text();
+        document.getElementById("response").textContent = "Server replied: " + result;
+      } catch (err) {
+        document.getElementById("response").textContent = "Request failed: " + err.message;
+      }
+    }
+
+
+    async function sendLogin() {
+      const message = document.getElementById("msg").value;
+
+      // Example: POST request to /login endpoint
+      try {
+        const response = await fetch("/login", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ text: message })
+         });
+
+        if (!response.ok) {
+            throw new Error("HTTP error " + response.status);
+        }
+
+        const result = await response.text();
+        document.getElementById("response").textContent = "Server replied: " + result;
+      } catch (err) {
+        document.getElementById("response").textContent = "Request failed: " + err.message;
+      }
+    }
+
+    async function sendHello() {
+      const message = document.getElementById("msg").value;
+
+      // Example: PUT request to /hello endpoint
+      try {
+        const response = await fetch("/hello", {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ text: message })
+         });
+
+        if (!response.ok) {
+            throw new Error("HTTP error " + response.status);
+        }
+
+        const result = await response.text();
+        document.getElementById("response").textContent = "Server replied: " + result;
+      } catch (err) {
+        document.getElementById("response").textContent = "Request failed: " + err.message;
+      }
+    }
+   </script>
+
+</head>
+<body>
+  <h2>Send Message to Server</h2>
+
+  <!-- Input field -->
+  <label for="msg">Message:</label>
+  <input type="text" id="msg">
+  <button onclick="sendEcho()">Send Echo</button>
+  <button onclick="sendLogin()">Send Login</button>
+  <button onclick="sendHello()">Send Hello</button>
+
+  <!-- Output area -->
+  <label for="output">Server output:</label>
+  <p id="response"></p>
+</body>
+</html>
