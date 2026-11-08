@@ -11,16 +11,47 @@
 #
 
 """
-deamon.streaprous
+daemon.streaprous
 ~~~~~~~~~~~~~~~~~
 
-This module provides a StreapRous object to deploy RESTful url web app with routing
+This module provides a StreapRous application router. Handlers are registered
+under (HTTP method, path) keys; the request parser selects a handler and the
+HTTP adapter executes it.
+
+The router also owns application-level before/after hooks. The route table is a
+dict subclass so existing backend and adapter code can keep treating it as a
+plain route mapping, while the adapter can discover hooks through attributes.
 """
 
 import asyncio
-import inspect
+from dataclasses import dataclass
 
-from .backend import create_backend
+from .backend import async_server, create_backend, run_backend_standard
+from .request import Request
+
+
+class RouteTable(dict):
+    """A route mapping that also carries application hooks.
+
+    The dict keys are (METHOD, path) pairs. Hook lists are consumed by the HTTP
+    adapter; keeping them on the table lets the backend pass one object through
+    without changing the route representation.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.before_request_hooks = []
+        self.after_request_hooks = []
+
+
+@dataclass(frozen=True)
+class Route:
+    """A registered route and its adapter-facing metadata."""
+
+    path: str
+    methods: tuple
+    handler: object
+    auth: bool
 
 
 class StreapRous:
@@ -28,8 +59,8 @@ class StreapRous:
     mutable web application router for deploying RESTful URL endpoints.
 
     The `StreapRous` class provides a decorator-based routing system for building simple
-    RESTful web applications.  The class allows developers to register route handlers 
-    using decorators and launch a TCP-based backend server to serve RESTful requests. 
+    RESTful web applications.  The class allows developers to register route handlers
+    using decorators and launch a TCP-based backend server to serve RESTful requests.
     Each route is mapped to a handler function based on HTTP method and path. It mappings
     supports tracking the combined HTTP methods and path route mappings internally.
 
@@ -48,82 +79,115 @@ class StreapRous:
     """
 
     def __init__(self):
-        """
-        Initialize a new StreapRous instance.
-
-        Sets up an empty route registry and prepares placeholders for IP and port.
-        """
-        self.routes = {}
+        self.routes = RouteTable()
+        self._route_specs = []
         self.ip = None
         self.port = None
-        return
 
     def prepare_address(self, ip, port):
-        """
-        Configure the IP address and port for the backend server.
-
-        :param ip (str): The IP address to bind the server.
-        :param port (str): The port number to listen on.
-        """
+        """Configure the IP address and port for the backend server."""
         self.ip = ip
         self.port = port
+        return self
 
     def route(self, path, methods=None, auth=False):
-        """
-        Decorator to register a route handler for a specific path and HTTP methods.
+        """Register a handler for one or more HTTP methods.
 
-        :param path (str): The URL path to route.
-        :param methods (list): A list of HTTP methods (e.g., ['GET', 'POST']) to bind.
-        :param auth (bool): Whether the adapter must require an authenticated user.
-
-        :rtype: function - A decorator that registers the handler function.
+        :param path (str): URL path beginning with '/'.
+        :param methods (list): HTTP methods; defaults to ['GET'].
+        :param auth (bool): Require an authenticated request.user.
+        :rtype: function - decorator returning the original handler.
         """
-        if methods is None:
-            methods = ['GET']
         def decorator(func):
-            for method in methods:
-                self.routes[(method.upper(), path)] = func
+            if not callable(func):
+                raise TypeError("route handler must be callable")
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ValueError("route path must begin with '/'")
+            selected = ["GET"] if methods is None else methods
+            if isinstance(selected, str):
+                selected = [selected]
+            normalized = []
+            for method in selected:
+                method = str(method).upper()
+                if method and method not in normalized:
+                    normalized.append(method)
+            if not normalized:
+                raise ValueError("route must declare at least one method")
 
-            # Metadata lets the adapter find the original handler signature
-            # and the route's authentication requirement.
+            route_auth = bool(auth or getattr(func, "_route_auth", False))
             func._route_path = path
-            func._route_methods = methods
-            func._route_auth = bool(auth)
+            func._route_methods = tuple(normalized)
+            func._route_auth = route_auth
 
-            def sync_wrapper(*args, **kwargs):
-               print(f"[StreapRous] running sync function...  [{methods}] {path}")
-               result = func(*args, **kwargs)
-               return result
+            for method in normalized:
+                self.routes[(method, path)] = func
+            self._route_specs.append(
+                Route(path, tuple(normalized), func, route_auth)
+            )
+            return func
 
-            async def async_wrapper(*args, **kwargs):
-               print(f"[StreapRous] running Async function... [{methods}] {path}")
-               result = await func(*args, **kwargs)
-               return result
-
-            for wrapper in (sync_wrapper, async_wrapper):
-                wrapper._route_path = path
-                wrapper._route_methods = methods
-                wrapper._route_auth = bool(auth)
-                wrapper._route_handler = func
-
-            if inspect.iscoroutinefunction(func):
-               return async_wrapper
-            else:
-               return sync_wrapper
         return decorator
 
-    def run(self):
+    def add_route(self, path, handler, methods=None, auth=False):
+        """Register a handler without decorator syntax."""
+        self.route(path, methods=methods, auth=auth)(handler)
+        return handler
+
+    def before_request(self, func):
+        """Register a hook called as func(request) before dispatch."""
+        if not callable(func):
+            raise TypeError("before_request hook must be callable")
+        self.routes.before_request_hooks.append(func)
+        return func
+
+    def after_request(self, func):
+        """Register a hook called as func(request, response)."""
+        if not callable(func):
+            raise TypeError("after_request hook must be callable")
+        self.routes.after_request_hooks.append(func)
+        return func
+
+    @staticmethod
+    def require_auth(func):
+        """Mark a handler as requiring an authenticated request.user."""
+        func._route_auth = True
+        return func
+
+    def match(self, method, path):
+        """Return (handler, path_params, allowed_methods) for a path.
+
+        This uses the same matcher as the request parser, so router and parser
+        cannot drift on parameter syntax or method fallback.
         """
-        Start the backend server and begin handling requests.
+        request = Request()
+        request.method = str(method).upper()
+        request.path = path
+        request.version = "HTTP/1.1"
+        handler = request.match_route(self.routes)
+        return handler, request.path_params, request.allowed_methods
 
-        This method launches the TCP server using the configured IP and port,
-        and dispatches incoming requests to the registered route handlers.
+    def run(self, transport=None, interface=None):
+        """Start the backend server using the configured address.
 
-        :raise: Error if IP or port has not been configured.
+        :param transport: None/'raw', 'standard', or 'async'/'asyncio'.
+        :param interface: Optional network interface for the raw transport.
         """
         if not self.ip or not self.port:
-            print("Rous app need to preapre address"
-                  "by calling app.prepare_address(ip,port)")
+            raise RuntimeError(
+                "call app.prepare_address(ip, port) before app.run()"
+            )
 
-        create_backend(self.ip, self.port, self.routes)
-        
+        selected = (transport or "raw").lower()
+        if selected == "standard":
+            run_backend_standard(self.ip, self.port, self.routes)
+        elif selected in ("async", "asyncio", "coroutine"):
+            asyncio.run(async_server(self.ip, self.port, self.routes))
+        elif selected == "raw":
+            create_backend(
+                self.ip,
+                self.port,
+                self.routes,
+                interface=interface,
+            )
+        else:
+            raise ValueError(f"unknown transport: {transport!r}")

@@ -143,7 +143,7 @@ async def handle_client_coroutine(reader, writer, routes=None):
     addr = writer.get_extra_info("peername")
     print(f"[Backend] Invoke handle_client_coroutine accepted connection from {addr}")
 
-    daemon = HttpAdapter(None, None, None, None, routes or {})
+    daemon = HttpAdapter(None, None, None, None, routes if routes is not None else {})
     await daemon.handle_client_coroutine(reader, writer)
 
 async def async_server(ip="0.0.0.0", port=7000, routes=None):
@@ -192,7 +192,7 @@ def run_backend(ip, port, routes, interface=None):
     is_localhost = (ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.") or ip == "localhost")
     
     if is_localhost:
-        raise ValueError("Invalid localhost address")
+        run_backend_standard(ip, port, routes)
         return
 
     # Auto-detect interface if not provided

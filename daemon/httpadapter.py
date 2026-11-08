@@ -125,7 +125,7 @@ class HttpAdapter:
         self.port = port
         self.conn = conn
         self.connaddr = connaddr
-        self.routes = routes or {}
+        self.routes = routes if routes is not None else {}
         self.request = Request()
         self.response = Response()
         self.conn_info = None
@@ -138,7 +138,7 @@ class HttpAdapter:
         """Serve one standard TCP client, supporting keep-alive."""
         self.conn = conn
         self.connaddr = addr
-        self.routes = routes or {}
+        self.routes = routes if routes is not None else {}
         try:
             conn.settimeout(config.SOCKET_TIMEOUT)
         except OSError:
@@ -258,7 +258,7 @@ class HttpAdapter:
         """Serve one raw-socket client and close the connection afterwards."""
         self.raw_socket = raw_socket
         self.conn_info = conn_info
-        self.routes = routes or {}
+        self.routes = routes if routes is not None else {}
         self.connaddr = (conn_info.client_ip, conn_info.client_port)
 
         reader = _BufferedReader(
@@ -433,26 +433,89 @@ class HttpAdapter:
     def dispatch(self, request):
         """Dispatch a request synchronously and return a Response."""
         self.request = request
+        before = self._run_before_hooks_sync(request)
+        if before is not None:
+            response = self._normalize_result(before, request)
+            return self._run_after_hooks_sync(request, response)
+
         if request.hook is None:
             if request.allowed_methods:
                 raise MethodNotAllowed(allowed=request.allowed_methods)
-            return Response()
-
-        self._check_route_auth(request)
-        result = self._call_handler_sync(request.hook, request)
-        return self._normalize_result(result, request)
+            response = Response()
+        else:
+            self._check_route_auth(request)
+            result = self._call_handler_sync(request.hook, request)
+            response = self._normalize_result(result, request)
+        return self._run_after_hooks_sync(request, response)
 
     async def dispatch_async(self, request):
         """Dispatch a request from an event loop and return a Response."""
         self.request = request
+        before = await self._run_before_hooks_async(request)
+        if before is not None:
+            response = self._normalize_result(before, request)
+            return await self._run_after_hooks_async(request, response)
+
         if request.hook is None:
             if request.allowed_methods:
                 raise MethodNotAllowed(allowed=request.allowed_methods)
-            return Response()
+            response = Response()
+        else:
+            self._check_route_auth(request)
+            result = await self._call_handler_async(request.hook, request)
+            response = self._normalize_result(result, request)
+        return await self._run_after_hooks_async(request, response)
 
-        self._check_route_auth(request)
-        result = await self._call_handler_async(request.hook, request)
-        return self._normalize_result(result, request)
+    def _hooks(self, name):
+        return list(getattr(self.routes, name, None) or [])
+
+    def _call_hook_sync(self, hook, *args):
+        result = hook(*args)
+        if inspect.isawaitable(result):
+            result = asyncio.run(result)
+        return result
+
+    async def _call_hook_async(self, hook, *args):
+        result = hook(*args)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _run_before_hooks_sync(self, request):
+        for hook in self._hooks("before_request_hooks"):
+            result = self._call_hook_sync(hook, request)
+            if result is not None:
+                return result
+        return None
+
+    async def _run_before_hooks_async(self, request):
+        for hook in self._hooks("before_request_hooks"):
+            result = await self._call_hook_async(hook, request)
+            if result is not None:
+                return result
+        return None
+
+    def _run_after_hooks_sync(self, request, response):
+        current = response
+        for hook in self._hooks("after_request_hooks"):
+            result = self._call_hook_sync(hook, request, current)
+            if result is not None:
+                if isinstance(result, Response):
+                    current = result
+                else:
+                    current = self._normalize_result(result, request)
+        return current
+
+    async def _run_after_hooks_async(self, request, response):
+        current = response
+        for hook in self._hooks("after_request_hooks"):
+            result = await self._call_hook_async(hook, request, current)
+            if result is not None:
+                if isinstance(result, Response):
+                    current = result
+                else:
+                    current = self._normalize_result(result, request)
+        return current
 
     def _check_route_auth(self, request):
         if getattr(request.hook, "_route_auth", False) and request.user is None:
