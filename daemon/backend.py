@@ -42,6 +42,7 @@ Usage Example:
 
 import argparse
 import asyncio
+import functools
 import inspect
 import selectors
 import socket
@@ -77,7 +78,7 @@ def handle_client(ip, port, conn, addr, routes):
     :param addr (tuple): client address (IP, port).
     :param routes (dict): Dictionary of route handlers.
     """
-    print("[Backend] Invoke handle_client accepted connection from {}".format(addr))
+    print(f"[Backend] Invoke handle_client accepted connection from {addr}")
     daemon = HttpAdapter(ip, port, conn, addr, routes)
 
     # Handle client
@@ -93,7 +94,7 @@ def handle_client_callback(server, ip, port,conn, addr, routes):
     :param port (int): Port number the server is listening on.
     :param routes (dict): Dictionary of route handlers.
     """
-    print("[Backend] Invoke handle_client_callback accepted connection from {}".format(addr))
+    print(f"[Backend] Invoke handle_client_callback accepted connection from {addr}")
 
     daemon = HttpAdapter(ip, port, conn, addr, routes)
 
@@ -110,7 +111,7 @@ def handle_client_raw(server, conn_info, routes):
     :param conn_info: conn_struct tuple for the established connection
     :param routes (dict): Dictionary of route handlers.
     """
-    print("[Backend] Invoke handle_client_raw for {}:{}".format(conn_info.client_ip, conn_info.client_port))
+    print(f"[Backend] Invoke handle_client_raw for {conn_info.client_ip}:{conn_info.client_port}")
     
     # Create HttpAdapter with connection info
     daemon = HttpAdapter(
@@ -130,33 +131,37 @@ def handle_client_raw(server, conn_info, routes):
 
 
 # Coroutine async/await for handling new client
-async def handle_client_coroutine(reader, writer):
+async def handle_client_coroutine(reader, writer, routes=None):
     """
     Coroutine in async communication to initialize connection instance
     then delegates the client handling logic to it.
 
     :param reader (StreamReader): Stream reader wrapper.
-    :param write (Stream write): Stream write wrapper.
+    :param writer (StreamWriter): Stream writer wrapper.
+    :param routes (dict): Dictionary of route handlers.
     """
     addr = writer.get_extra_info("peername")
-    print("[Backend] Invoke handle_client_coroutine accepted connection from {}".format(addr))
+    print(f"[Backend] Invoke handle_client_coroutine accepted connection from {addr}")
 
-    # Handle client in asynchronous mode
-    while True:
-        daemon = HttpAdapter(None, None, None, None, None)
-        await daemon.handle_client_coroutine(reader, writer)
+    daemon = HttpAdapter(None, None, None, None, routes or {})
+    await daemon.handle_client_coroutine(reader, writer)
 
-async def async_server(ip="0.0.0.0", port=7000, routes={}):
-    print("[Backend] async_server **ASYNC** listening on port {}".format(port))
+async def async_server(ip="0.0.0.0", port=7000, routes=None):
+    if routes is None:
+        routes = {}
+    print(f"[Backend] async_server **ASYNC** listening on port {port}")
     if routes != {}:
         print("[Backend] route settings")
         for key, value in routes.items():
             isCoFunc = ""
             if inspect.iscoroutinefunction(value):
                isCoFunc += "**ASYNC** "
-            print("   + ('{}', '{}'): {}{}".format(key[0], key[1], isCoFunc, str(value)))
+            print(f"   + ('{key[0]}', '{key[1]}'): {isCoFunc}{value!s}")
 
-    async_server = await asyncio.start_server(handle_client_coroutine, ip, port)
+    client_handler = functools.partial(
+        handle_client_coroutine, routes=routes
+    )
+    async_server = await asyncio.start_server(client_handler, ip, port)
     async with async_server:
         await async_server.serve_forever()
     return
@@ -176,7 +181,7 @@ def run_backend(ip, port, routes, interface=None):
     # This global variable to configure the asynchrnous mode or not
     global mode_async
 
-    print("[Backend] run_backend with routes={}".format(routes))
+    print(f"[Backend] run_backend with routes={routes}")
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
 
@@ -200,14 +205,14 @@ def run_backend(ip, port, routes, interface=None):
         # Create raw socket
         server = create_raw_socket()
         
-        print("[Backend] Listening on port {}".format(port))
+        print(f"[Backend] Listening on port {port}")
         if routes != {}:
             print("[Backend] route settings")
             for key, value in routes.items():
                isCoFunc = ""
                if inspect.iscoroutinefunction(value):
                   isCoFunc += "**ASYNC** "
-               print("   + ('{}', '{}'): {}{}".format(key[0], key[1], isCoFunc, str(value)))
+               print(f"   + ('{key[0]}', '{key[1]}'): {isCoFunc}{value!s}")
 
         # Main accept loop using streaprous raw connection
         while True:
@@ -217,7 +222,7 @@ def run_backend(ip, port, routes, interface=None):
             if conn_info is None:
                 continue
                 
-            print("[Backend] Accepted connection from {}:{}".format(conn_info.client_ip, conn_info.client_port))
+            print(f"[Backend] Accepted connection from {conn_info.client_ip}:{conn_info.client_port}")
             
             # Handle client in a separate thread
             client_thread = threading.Thread(
@@ -227,12 +232,12 @@ def run_backend(ip, port, routes, interface=None):
             )
             client_thread.start()
 
-    except socket.error as e:
-      print("Socket error: {}".format(e))
+    except OSError as e:
+      print(f"Socket error: {e}")
     except PermissionError:
       print("Permission error: Raw sockets require root privileges (sudo)")
     except Exception as e:
-      print("Error: {}".format(e))
+      print(f"Error: {e}")
 
 
 def run_backend_standard(ip, port, routes):
@@ -245,7 +250,7 @@ def run_backend_standard(ip, port, routes):
     """
     global mode_async
     
-    print("[Backend] run_backend_standard with routes={}".format(routes))
+    print(f"[Backend] run_backend_standard with routes={routes}")
     
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
@@ -260,14 +265,14 @@ def run_backend_standard(ip, port, routes):
         server.bind((ip, port))
         server.listen(50)
 
-        print("[Backend] Listening on port {}".format(port))
+        print(f"[Backend] Listening on port {port}")
         if routes != {}:
             print("[Backend] route settings")
             for key, value in routes.items():
                isCoFunc = ""
                if inspect.iscoroutinefunction(value):
                   isCoFunc += "**ASYNC** "
-               print("   + ('{}', '{}'): {}{}".format(key[0], key[1], isCoFunc, str(value)))
+               print(f"   + ('{key[0]}', '{key[1]}'): {isCoFunc}{value!s}")
 
         if mode_async == "callback":
             sel.register(server, selectors.EVENT_READ, (handle_client_callback, ip, port, routes))
@@ -275,7 +280,7 @@ def run_backend_standard(ip, port, routes):
         while True:
             # Accept connection
             conn, addr = server.accept()
-            print("[Backend] Accepted connection from {}:{}".format(addr[0], addr[1]))
+            print(f"[Backend] Accepted connection from {addr[0]}:{addr[1]}")
             
             # Handle client in a separate thread
             client_thread = threading.Thread(
@@ -285,12 +290,12 @@ def run_backend_standard(ip, port, routes):
             )
             client_thread.start()
 
-    except socket.error as e:
-      print("Socket error: {}".format(e))
+    except OSError as e:
+      print(f"Socket error: {e}")
     except Exception as e:
-      print("Error: {}".format(e))
+      print(f"Error: {e}")
 
-def create_backend(ip, port, routes={}, interface=None):
+def create_backend(ip, port, routes=None, interface=None):
     """
     Entry point for creating and running the backend server.
 
@@ -300,4 +305,6 @@ def create_backend(ip, port, routes={}, interface=None):
     :param interface (str, optional): Network interface to bind to. Defaults to platform default.
     """
 
+    if routes is None:
+        routes = {}
     run_backend(ip, port, routes, interface)

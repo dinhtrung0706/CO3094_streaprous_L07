@@ -68,32 +68,43 @@ class StreapRous:
         self.ip = ip
         self.port = port
 
-    def route(self, path, methods=['GET']):
+    def route(self, path, methods=None, auth=False):
         """
         Decorator to register a route handler for a specific path and HTTP methods.
 
         :param path (str): The URL path to route.
         :param methods (list): A list of HTTP methods (e.g., ['GET', 'POST']) to bind.
+        :param auth (bool): Whether the adapter must require an authenticated user.
 
         :rtype: function - A decorator that registers the handler function.
         """
+        if methods is None:
+            methods = ['GET']
         def decorator(func):
             for method in methods:
                 self.routes[(method.upper(), path)] = func
 
-            # Optional attach route metadata to the function
+            # Metadata lets the adapter find the original handler signature
+            # and the route's authentication requirement.
             func._route_path = path
             func._route_methods = methods
+            func._route_auth = bool(auth)
 
             def sync_wrapper(*args, **kwargs):
-               print("[StreapRous] running sync function...  [{}] {}".format(methods, path))
+               print(f"[StreapRous] running sync function...  [{methods}] {path}")
                result = func(*args, **kwargs)
                return result
 
             async def async_wrapper(*args, **kwargs):
-               print("[StreapRous] running Async function... [{}] {}".format(methods, path))
+               print(f"[StreapRous] running Async function... [{methods}] {path}")
                result = await func(*args, **kwargs)
                return result
+
+            for wrapper in (sync_wrapper, async_wrapper):
+                wrapper._route_path = path
+                wrapper._route_methods = methods
+                wrapper._route_auth = bool(auth)
+                wrapper._route_handler = func
 
             if inspect.iscoroutinefunction(func):
                return async_wrapper
