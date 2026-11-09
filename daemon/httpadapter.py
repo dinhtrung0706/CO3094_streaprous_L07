@@ -26,6 +26,7 @@ daemon.request and response construction lives in daemon.response.
 import asyncio
 import inspect
 import logging
+import re
 import socket
 
 from streaprous_socket.streaprous_raw_connection import (
@@ -87,7 +88,7 @@ class _BufferedReader:
                 data = self.buffer[:index]
                 self.buffer = self.buffer[index + len(delimiter) :]
                 return data, True
-            if len(self.buffer) >= limit:
+            if len(self.buffer) >= limit + len(delimiter):
                 raise limit_error("HTTP line is too long")
             if not self._receive():
                 if not self.buffer:
@@ -293,6 +294,7 @@ class HttpAdapter:
 
             try:
                 response = self.dispatch(request)
+                response.keep_alive = False
                 payload = response.build_response(request)
             except HTTPError as exc:
                 payload = self._error_payload(request, exc)
@@ -389,7 +391,8 @@ class HttpAdapter:
         finally:
             try:
                 writer.close()
-                await writer.wait_closed()
+                if hasattr(writer, "wait_closed"):
+                    await writer.wait_closed()
             except (ConnectionResetError, BrokenPipeError, OSError):
                 pass
 
@@ -401,6 +404,8 @@ class HttpAdapter:
                 timeout=config.SOCKET_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            if getattr(reader, "_buffer", b""):
+                raise RequestTimeout("Request timed out")
             return None
         except asyncio.IncompleteReadError as exc:
             if not exc.partial:
@@ -472,8 +477,21 @@ class HttpAdapter:
     def _call_hook_sync(self, hook, *args):
         result = hook(*args)
         if inspect.isawaitable(result):
-            result = asyncio.run(result)
+            result = self._run_awaitable_sync(result)
         return result
+
+    def _run_awaitable_sync(self, awaitable):
+        try:
+            previous = asyncio.get_event_loop()
+        except RuntimeError:
+            previous = None
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(awaitable)
+        finally:
+            asyncio.set_event_loop(previous)
+            loop.close()
 
     async def _call_hook_async(self, hook, *args):
         result = hook(*args)
@@ -597,6 +615,16 @@ class HttpAdapter:
             return (), {}
         if accepts_varargs:
             return (request.headers, request.text), path_kwargs
+        positional = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        if len(positional) == 1:
+            return (request,), path_kwargs
         return (request.headers, request.text), path_kwargs
 
     def _call_handler_sync(self, handler, request):
@@ -604,7 +632,7 @@ class HttpAdapter:
         args, kwargs = self._handler_call(target, request)
         result = target(*args, **kwargs)
         if inspect.isawaitable(result):
-            result = asyncio.run(result)
+            result = self._run_awaitable_sync(result)
         return result
 
     async def _call_handler_async(self, handler, request):
@@ -749,7 +777,7 @@ class HttpAdapter:
         if value is None:
             return None
         parts = [part.strip() for part in value.split(",")]
-        if not parts or any(not part or not part.isdigit() for part in parts):
+        if not parts or any(not re.fullmatch(r"[0-9]+", part) for part in parts):
             raise BadRequest("Invalid Content-Length")
         lengths = {int(part) for part in parts}
         if len(lengths) != 1:

@@ -22,11 +22,14 @@ The router also owns application-level before/after hooks. The route table is a
 dict subclass so existing backend and adapter code can keep treating it as a
 plain route mapping, while the adapter can discover hooks through attributes.
 """
-
-import asyncio
 from dataclasses import dataclass
 
-from .backend import async_server, create_backend, run_backend_standard
+from .backend import (
+    _run_coroutine,
+    async_server,
+    create_backend,
+    run_backend_standard,
+)
 from .request import Request
 
 
@@ -181,7 +184,7 @@ class StreapRous:
         if selected == "standard":
             run_backend_standard(self.ip, self.port, self.routes)
         elif selected in ("async", "asyncio", "coroutine"):
-            asyncio.run(async_server(self.ip, self.port, self.routes))
+            _run_coroutine(async_server(self.ip, self.port, self.routes))
         elif selected == "raw":
             create_backend(
                 self.ip,

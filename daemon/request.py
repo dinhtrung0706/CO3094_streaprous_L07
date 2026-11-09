@@ -397,6 +397,8 @@ class Request:
         raw = self._coerce_message(request)
         boundary = raw.find(b"\r\n\r\n")
         if boundary < 0:
+            if len(raw) > config.MAX_HEADER_BYTES:
+                raise RequestHeaderFieldsTooLarge("HTTP headers are too large")
             raise BadRequest("Incomplete HTTP headers")
         head = raw[:boundary]
         body = raw[boundary + 4:]
@@ -445,7 +447,9 @@ class Request:
 
         if content_length is not None:
             parts = [part.strip() for part in content_length.split(",")]
-            if not parts or any(not part or not part.isdigit() for part in parts):
+            if not parts or any(
+                not re.fullmatch(r"[0-9]+", part) for part in parts
+            ):
                 raise BadRequest("Invalid Content-Length")
             lengths = {int(part) for part in parts}
             if len(lengths) != 1:

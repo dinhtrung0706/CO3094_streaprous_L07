@@ -11,7 +11,7 @@
 #
 
 try:
-    from urlparse import unquote, urlparse
+    from urlparse import unquote, urlparse  # type: ignore
 except ImportError:
     from urllib.parse import unquote, urlparse
 

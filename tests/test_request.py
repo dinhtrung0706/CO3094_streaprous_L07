@@ -733,6 +733,19 @@ class CompatibilityTests(unittest.TestCase):
         request = parse("GET", "/hello")
         self.assertEqual(repr(request), "<Request GET /hello HTTP/1.1>")
 
+    def test_non_ascii_superscript_content_length_is_bad_request(self):
+        raw = b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: \xb2\r\n\r\n"
+        with self.assertRaises(BadRequest) as ctx:
+            Request().prepare(raw)
+        self.assertEqual(str(ctx.exception), "Invalid Content-Length")
+
+    def test_oversized_unterminated_headers_raises_431(self):
+        raw = b"GET / HTTP/1.1\r\nHost: x\r\nX-Pad: " + b"a" * 50
+        with patch.object(config, "MAX_HEADER_BYTES", 32), self.assertRaises(
+            RequestHeaderFieldsTooLarge
+        ):
+            Request().prepare(raw)
+
 
 if __name__ == "__main__":
     unittest.main()

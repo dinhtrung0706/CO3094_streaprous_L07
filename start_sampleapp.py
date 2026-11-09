@@ -29,6 +29,7 @@ import json
 import socket
 
 from apps import create_sampleapp
+from start_backend import setup_rst_block
 
 PORT = 2026  # Default port
 
@@ -41,6 +42,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     ip = args.server_ip
     port = args.server_port
+
+    is_localhost = (ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.") or ip == "localhost")
+    if not is_localhost:
+            setup_rst_block(ip, port)
 
     # Prepare and launch the RESTful application
     create_sampleapp(ip, port)

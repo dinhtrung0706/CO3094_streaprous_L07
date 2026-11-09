@@ -51,6 +51,9 @@ class MethodNotAllowed(HTTPError):
             headers.setdefault("Allow", ", ".join(self.allowed))
         super().__init__(message, headers=headers, **kwargs)
 
+class ProxyAuthenticationRequired(HTTPError):
+    status_code = 407
+    reason = "Proxy Authentication Required"
 
 class RequestTimeout(HTTPError):
     status_code = 408

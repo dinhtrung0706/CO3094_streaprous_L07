@@ -146,6 +146,19 @@ async def handle_client_coroutine(reader, writer, routes=None):
     daemon = HttpAdapter(None, None, None, None, routes if routes is not None else {})
     await daemon.handle_client_coroutine(reader, writer)
 
+def _run_coroutine(coro):
+    """Run an async coroutine cleanly on Python 3.6+."""
+    if hasattr(asyncio, "run"):
+        return asyncio.run(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 async def async_server(ip="0.0.0.0", port=7000, routes=None):
     if routes is None:
         routes = {}
@@ -161,9 +174,15 @@ async def async_server(ip="0.0.0.0", port=7000, routes=None):
     client_handler = functools.partial(
         handle_client_coroutine, routes=routes
     )
-    async_server = await asyncio.start_server(client_handler, ip, port)
-    async with async_server:
-        await async_server.serve_forever()
+    server = await asyncio.start_server(client_handler, ip, port)
+    try:
+        if hasattr(server, "serve_forever"):
+            await server.serve_forever()
+        else:
+            await asyncio.Future()
+    finally:
+        server.close()
+        await server.wait_closed()
     return
 
 
@@ -185,7 +204,7 @@ def run_backend(ip, port, routes, interface=None):
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
 
-       asyncio.run(async_server(ip, port, routes))
+       _run_coroutine(async_server(ip, port, routes))
        return
 
     # Check if IP is localhost/loopback
@@ -232,10 +251,10 @@ def run_backend(ip, port, routes, interface=None):
             )
             client_thread.start()
 
-    except OSError as e:
-      print(f"Socket error: {e}")
     except PermissionError:
       print("Permission error: Raw sockets require root privileges (sudo)")
+    except OSError as e:
+      print(f"Socket error: {e}")
     except Exception as e:
       print(f"Error: {e}")
 
@@ -254,7 +273,7 @@ def run_backend_standard(ip, port, routes):
     
     # Process async stream for registering the service and terminate
     if mode_async == "coroutine":
-        asyncio.run(async_server(ip, port, routes))
+        _run_coroutine(async_server(ip, port, routes))
         return
 
     # Process socket object using standard socket

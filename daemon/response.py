@@ -107,12 +107,19 @@ _MANAGED_HEADERS = {
 }
 
 
+_EXTRA_REASONS = {418: "I'm a Teapot"}
+
+
 def _reason_for(status_code):
     """Return the standard reason phrase for a status code."""
     try:
-        return HTTPStatus(int(status_code)).phrase
+        code = int(status_code)
     except (TypeError, ValueError):
         return "Unknown"
+    try:
+        return HTTPStatus(code).phrase
+    except ValueError:
+        return _EXTRA_REASONS.get(code, "Unknown")
 
 
 def _with_charset(content_type):
@@ -229,7 +236,7 @@ class Response:
         #: Response protocol version.
         self.http_version = "HTTP/1.1"
         #: None derives from the request; True/False overrides it.
-        self.keep_alive = None
+        self.keep_alive: bool
         #: URL/target associated with the response.
         self.url = None
         self.history = []

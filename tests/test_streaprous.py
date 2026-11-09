@@ -1,7 +1,14 @@
-import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
+try:
+    from unittest.mock import AsyncMock
+except ImportError:  # Python < 3.8
+    class AsyncMock(MagicMock):
+        async def __call__(self, *args, **kwargs):
+            return super().__call__(*args, **kwargs)
+
+from daemon.backend import _run_coroutine
 from daemon.httpadapter import HttpAdapter
 from daemon.request import Request
 from daemon.response import Response
@@ -286,7 +293,9 @@ class HookDispatchTests(unittest.TestCase):
             return {"user": request.user}
 
         request = make_request("/secure", routes=app.routes)
-        response = asyncio.run(self._adapter(app.routes).dispatch_async(request))
+        response = _run_coroutine(
+            self._adapter(app.routes).dispatch_async(request)
+        )
         headers, body = response_parts(response.build_response(request))
         self.assertEqual(headers[0], "HTTP/1.1 200 OK")
         self.assertEqual(header_value(headers, "X-Async-Hook"), "yes")

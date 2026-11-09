@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from daemon import config
+from daemon.backend import _run_coroutine
 from daemon.backend import handle_client_coroutine as backend_async_handler
 from daemon.errors import BadRequest, MethodNotAllowed, Unauthorized
 from daemon.httpadapter import HttpAdapter, _BufferedReader
@@ -102,7 +103,7 @@ def call_adapter(routes, raw, timeout=3.0):
     while True:
         try:
             chunk = client.recv(65536)
-        except TimeoutError:
+        except (TimeoutError, socket.timeout):
             break
         if not chunk:
             break
@@ -761,6 +762,7 @@ class RawTransportTests(unittest.TestCase):
         self.assertTrue(sent)
         headers, body = split_response(sent[-1])
         self.assertEqual(status_of(headers), "HTTP/1.1 200 OK")
+        self.assertEqual(header_value(headers, "Connection"), "close")
         self.assertEqual(json.loads(body.decode("utf-8")), {"ok": True})
 
     def test_raw_malformed_request_sends_400(self):
@@ -825,12 +827,14 @@ class AsyncTransportTests(unittest.TestCase):
                 data = await asyncio.wait_for(reader.read(), timeout=3)
             finally:
                 writer.close()
-                await writer.wait_closed()
+                if hasattr(writer, "wait_closed"):
+                    await writer.wait_closed()
                 server.close()
-                await server.wait_closed()
+                if hasattr(server, "wait_closed"):
+                    await server.wait_closed()
             return data
 
-        return asyncio.run(run())
+        return _run_coroutine(run())
 
     def test_async_static(self):
         payload = self._call({}, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -898,14 +902,44 @@ class AsyncTransportTests(unittest.TestCase):
                 data = await asyncio.wait_for(reader.read(), timeout=3)
             finally:
                 writer.close()
-                await writer.wait_closed()
+                if hasattr(writer, "wait_closed"):
+                    await writer.wait_closed()
                 server.close()
-                await server.wait_closed()
+                if hasattr(server, "wait_closed"):
+                    await server.wait_closed()
             return data
 
-        payload = asyncio.run(run())
+        payload = _run_coroutine(run())
         _headers, body = split_response(payload)
         self.assertEqual(json.loads(body.decode("utf-8")), {"ok": True})
+
+    def test_async_partial_header_timeout_sends_408(self):
+        async def run():
+            adapter = HttpAdapter(None, None, None, None, {})
+            server = await asyncio.start_server(
+                adapter.handle_client_coroutine,
+                "127.0.0.1",
+                0,
+            )
+            port = server.sockets[0].getsockname()[1]
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\n")
+            await writer.drain()
+            try:
+                data = await asyncio.wait_for(reader.read(), timeout=3)
+            finally:
+                writer.close()
+                if hasattr(writer, "wait_closed"):
+                    await writer.wait_closed()
+                server.close()
+                if hasattr(server, "wait_closed"):
+                    await server.wait_closed()
+            return data
+
+        with patch.object(config, "SOCKET_TIMEOUT", 0.05):
+            payload = _run_coroutine(run())
+        headers, _body = split_response(payload)
+        self.assertEqual(status_of(headers), "HTTP/1.1 408 Request Timeout")
 
 
 class RouterIntegrationTests(unittest.TestCase):
@@ -988,6 +1022,52 @@ class CompatibilityTests(unittest.TestCase):
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
         headers = adapter.build_proxy_headers("http://proxy")
         self.assertIn("Proxy-Authorization", headers)
+
+    def test_single_positional_arg_custom_name_handler(self):
+        def custom(req_obj):
+            return {"path": req_obj.path}
+
+        routes = {("GET", "/ping"): custom}
+        payload = call_adapter(
+            routes, b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        )
+        headers, body = split_response(payload)
+        self.assertEqual(status_of(headers), "HTTP/1.1 200 OK")
+        self.assertEqual(json.loads(body.decode("utf-8")), {"path": "/ping"})
+
+    def test_exact_header_limit_across_chunks(self):
+        head = b"GET /x HTTP/1.1\r\nHost: x"
+        reader = make_reader(head, b"\r\n\r\n")
+        adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
+        with patch.object(config, "MAX_HEADER_BYTES", len(head)):
+            req = adapter.read_request(reader)
+        self.assertEqual(req.path, "/x")
+
+    def test_partial_socket_timeout_sends_408(self):
+        server, client = socket.socketpair()
+        adapter = HttpAdapter("127.0.0.1", 9000, server, ("127.0.0.1", 1), {})
+        thread = threading.Thread(
+            target=adapter.handle_client,
+            args=(server, ("127.0.0.1", 1), {}),
+            daemon=True,
+        )
+        with patch.object(config, "SOCKET_TIMEOUT", 0.05):
+            thread.start()
+            client.sendall(b"GET / HTTP/1.1\r\n")
+            client.settimeout(2.0)
+            data = b""
+            while True:
+                try:
+                    chunk = client.recv(65536)
+                except (TimeoutError, socket.timeout):
+                    break
+                if not chunk:
+                    break
+                data += chunk
+            thread.join(timeout=2.0)
+        client.close()
+        headers, _body = split_response(data)
+        self.assertEqual(status_of(headers), "HTTP/1.1 408 Request Timeout")
 
 
 if __name__ == "__main__":
