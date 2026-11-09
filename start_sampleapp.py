@@ -38,14 +38,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog='Backend', description='', epilog='Beckend daemon')
     parser.add_argument('--server-ip', default='0.0.0.0')
     parser.add_argument('--server-port', type=int, default=PORT)
- 
+    parser.add_argument(
+        '--transport',
+        choices=('auto', 'standard', 'raw', 'async'),
+        default='auto',
+        help='Transport: auto, standard, raw, or async. Default is auto.'
+    )
+
     args = parser.parse_args()
     ip = args.server_ip
     port = args.server_port
+    transport = args.transport
 
-    is_localhost = (ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.") or ip == "localhost")
-    if not is_localhost:
-            setup_rst_block(ip, port)
+    is_localhost = (
+        ip == "127.0.0.1"
+        or ip == "::1"
+        or ip.startswith("127.")
+        or ip == "localhost"
+    )
+    raw_expected = transport == "raw" or (
+        transport == "auto" and not is_localhost
+    )
+    if raw_expected:
+        setup_rst_block(ip, port)
 
     # Prepare and launch the RESTful application
-    create_sampleapp(ip, port)
+    create_sampleapp(ip, port, transport)

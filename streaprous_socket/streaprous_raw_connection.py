@@ -328,7 +328,7 @@ def create_raw_socket() -> socket.socket:
         sys.exit(1)
 
 
-def get_interface_ip(interface_name: str = None) -> str:
+def get_interface_ip(interface_name: str | None = None) -> str:
     """
     Get the IPv4 address of a network interface.
     
@@ -367,7 +367,7 @@ def get_interface_ip(interface_name: str = None) -> str:
         return "127.0.0.1"
 
 
-def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: str = None) -> conn_struct:
+def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: str | None = None) -> conn_struct:
     """
     Accept a new connection by performing the 3-way handshake using raw sockets.
     Returns a conn_struct tuple for the established connection.
@@ -402,7 +402,7 @@ def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: s
             # Get packet from dispatcher queue (for SYN packets)
             syn_q = get_packet_queue(_SYN_KEY)
             try:
-                packet, addr = syn_q.get(timeout=1.0)
+                packet, _addr = syn_q.get(timeout=1.0)
                 print(f"[Streap_raw] accept: Got packet from SYN queue")
             except queue.Empty:
                 continue
@@ -505,7 +505,7 @@ def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: s
                 deadline = time.time() + 10.0
                 while time.time() < deadline:
                     try:
-                        packet, addr = q.get(timeout=0.5)
+                        packet, _addr = q.get(timeout=0.5)
                         print(f"[Streap_raw] accept: Got packet from per-connection queue for {client_ip}:{client_port}")
                     except queue.Empty:
                         print(f"[Streap_raw] accept: Per-connection queue empty for {client_ip}:{client_port}, waiting...")
@@ -642,7 +642,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
         while True:
             # Get packet from the dispatcher queue instead of reading directly from socket
             try:
-                packet, addr = packet_queue.get(timeout=1.0)
+                packet, _addr = packet_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
 
@@ -694,8 +694,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                 s.sendto(ip_header + ack_packet, (client_ip, 0))
                 
                 with connections_lock:
-                    if client_key in connections:
-                        del connections[client_key]
+                    connections.pop(client_key, None)
                 # Clean up packet queue
                 remove_packet_queue(client_key)
                 return b""
@@ -704,8 +703,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
             if rst_flag:
                 print(f"[Streap_raw] Received RST from {client_ip}:{client_port}")
                 with connections_lock:
-                    if client_key in connections:
-                        del connections[client_key]
+                    connections.pop(client_key, None)
                 # Clean up packet queue
                 remove_packet_queue(client_key)
                 return b""

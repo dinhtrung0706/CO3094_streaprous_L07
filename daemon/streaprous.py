@@ -22,8 +22,6 @@ The router also owns application-level before/after hooks. The route table is a
 dict subclass so existing backend and adapter code can keep treating it as a
 plain route mapping, while the adapter can discover hooks through attributes.
 """
-from dataclasses import dataclass
-
 from .backend import (
     _run_coroutine,
     async_server,
@@ -47,14 +45,21 @@ class RouteTable(dict):
         self.after_request_hooks = []
 
 
-@dataclass(frozen=True)
 class Route:
     """A registered route and its adapter-facing metadata."""
 
-    path: str
-    methods: tuple
-    handler: object
-    auth: bool
+    __slots__ = ("auth", "handler", "methods", "path")
+
+    def __init__(self, path, methods, handler, auth):
+        self.path = path
+        self.methods = methods
+        self.handler = handler
+        self.auth = auth
+
+    def __repr__(self):
+        return "Route(path={!r}, methods={!r}, auth={!r})".format(
+            self.path, self.methods, self.auth
+        )
 
 
 class StreapRous:
@@ -180,17 +185,18 @@ class StreapRous:
                 "call app.prepare_address(ip, port) before app.run()"
             )
 
-        selected = (transport or "raw").lower()
+        selected = (transport or "auto").lower()
         if selected == "standard":
             run_backend_standard(self.ip, self.port, self.routes)
         elif selected in ("async", "asyncio", "coroutine"):
             _run_coroutine(async_server(self.ip, self.port, self.routes))
-        elif selected == "raw":
+        elif selected in ("auto", "raw"):
             create_backend(
                 self.ip,
                 self.port,
                 self.routes,
                 interface=interface,
+                transport=selected,
             )
         else:
             raise ValueError(f"unknown transport: {transport!r}")

@@ -97,7 +97,12 @@ def detect_interface(ip):
         # On macOS, try to get active interface using ifconfig
         try:
             import subprocess
-            result = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True)
+            result = subprocess.run(
+                ["route", "-n", "get", "default"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+            )
             for line in result.stdout.split('\n'):
                 if 'interface:' in line:
                     return line.split('interface:')[1].strip()
@@ -161,24 +166,34 @@ def parse_arguments():
         SERVER_INTERFACE = sys.argv[3]
 
 
-def main(ip, port, interface=None):
+def main(ip, port, interface=None, transport=None):
     """
     Main entry point for the backend server.
     """
+    selected = (transport or "auto").strip().lower()
+
     # Auto-detect interface if not provided
     if interface is None:
         interface = detect_interface(ip)
-    
+
     # Check if IP is localhost/loopback
-    is_localhost = (ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.") or ip == "localhost")
-    
-    # Setup RST blocking (skip for localhost)
-    if not is_localhost:
+    is_localhost = (
+        ip == "127.0.0.1"
+        or ip == "::1"
+        or ip.startswith("127.")
+        or ip == "localhost"
+    )
+
+    # RST blocking is only needed by the raw transport.
+    raw_expected = selected == "raw" or (
+        selected == "auto" and not is_localhost
+    )
+    if raw_expected:
         setup_rst_block(ip, port)
-    
+
     # Start the backend
-    create_backend(ip, port, {}, interface)
-    
+    create_backend(ip, port, {}, interface, transport=selected)
+
     return 0
 
 
@@ -217,6 +232,12 @@ if __name__ == "__main__":
         default='lo0',
         help='Network interface to bind to. Default is lo0 (macOS) or lo (Linux).'
     )
+    parser.add_argument(
+        '--transport',
+        choices=('auto', 'standard', 'raw', 'async'),
+        default='auto',
+        help='Transport: auto, standard, raw, or async. Default is auto.'
+    )
     # Positional arguments for backward compatibility
     parser.add_argument('positional_args', nargs='*', help=argparse.SUPPRESS)
   
@@ -252,4 +273,4 @@ if __name__ == "__main__":
     else:
         SERVER_INTERFACE = args.interface
     
-    sys.exit(main(ip, port, SERVER_INTERFACE))
+    sys.exit(main(ip, port, SERVER_INTERFACE, args.transport))

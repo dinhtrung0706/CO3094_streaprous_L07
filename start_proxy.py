@@ -18,109 +18,147 @@
 start_proxy
 ~~~~~~~~~~~~~~~~~
 
-This module serves as the entry point for launching a proxy server using Python's socket framework.
-It parses command-line arguments to configure the server's IP address and port, reads virtual host
-definitions from a configuration file, and initializes the proxy server with routing information.
+Entry point for the StreapRous reverse proxy. It parses virtual-host blocks
+from the proxy configuration and starts the proxy daemon.
 
-Requirements:
---------------
-- socket: provide socket networking interface.
-- threading: enables concurrent client handling via threads.
-- argparse: parses command-line arguments for server configuration.
-- re: used for regular expression matching in configuration parsing
-- response: response utilities.
-- httpadapter: the class for handling HTTP requests.
-- urlparse: parses URLs to extract host and port information.
-- daemon.create_proxy: initializes and starts the proxy server.
-
+Supported directives inside a host block:
+- proxy_pass http://host:port;
+- proxy_set_header HeaderName value;
+- dist_policy round-robin | least-conn | random;
 """
 
 import argparse
+import os
 import re
-import socket
-import threading
-from collections import defaultdict
-from urllib.parse import urlparse
+import sys
 
 from daemon import create_proxy
+from daemon.proxy import parse_backend_address
 
 PROXY_PORT = 8080
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIG = os.path.join(BASE_DIR, "config", "proxy.conf")
+
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+$")
+_CONTROL_RE = re.compile(r"[\x00-\x1F\x7F]")
+_POLICIES = {"round-robin", "least-conn", "random"}
+
+
+def _normalize_policy(value):
+    policy = str(value or "round-robin").strip().lower().replace("_", "-")
+    if policy in ("roundrobin", "round-robin"):
+        return "round-robin"
+    if policy in ("leastconn", "least-conn", "least-connections"):
+        return "least-conn"
+    if policy == "random":
+        return "random"
+    raise ValueError("unsupported dist_policy: {!r}".format(value))
+
+
+def _target_list(value):
+    return list(value) if isinstance(value, (list, tuple)) else [value]
 
 
 def parse_virtual_hosts(config_file):
+    """Parse host blocks from config_file into proxy route values.
+
+    Returns a dict mapping hostname to (target_or_targets, policy, headers).
+    Raises ValueError with a useful message for invalid configuration.
     """
-    Parses virtual host blocks from a config file.
+    with open(config_file, "r") as handle:
+        config_text = handle.read()
 
-    :config_file (str): Path to the NGINX config file.
-    :rtype list of dict: Each dict contains 'listen'and 'server_name'.
-    """
-
-    with open(config_file, 'r') as f:
-        config_text = f.read()
-
-    # Match each host block
-    host_blocks = re.findall(r'host\s+"([^"]+)"\s*\{(.*?)\}', config_text, re.DOTALL)
-
-    dist_policy_map = ""
+    config_text = re.sub(r"#.*$", "", config_text, flags=re.MULTILINE)
+    host_blocks = re.findall(
+        r'host\s+"([^"]+)"\s*\{(.*?)\}', config_text, re.DOTALL
+    )
+    if not host_blocks:
+        raise ValueError("no host blocks found in {}".format(config_file))
 
     routes = {}
     for host, block in host_blocks:
-        proxy_map = {}
+        host = host.strip()
+        if not host:
+            raise ValueError("empty host declaration")
 
-        # Find all proxy_pass entries
-        proxy_passes = re.findall(r'proxy_pass\s+http://([^\s;]+);', block)
-        map = proxy_map.get(host,[])
-        map = map + proxy_passes
-        proxy_map[host] = map
+        proxy_passes = re.findall(r"proxy_pass\s+([^\s;]+);", block)
+        if not proxy_passes:
+            raise ValueError("host {!r} has no proxy_pass".format(host))
+        targets = []
+        for target in proxy_passes:
+            try:
+                targets.append(parse_backend_address(target))
+            except ValueError as exc:
+                raise ValueError(
+                    "invalid proxy_pass for host {!r}: {}".format(host, exc)
+                )
+        targets = list(dict.fromkeys(targets))
 
-        # Find dist_policy if present
-        policy_match = re.search(r'dist_policy\s+(\w+)', block)
-        if policy_match:
-            dist_policy_map = policy_match.group(1)
-        else: #default policy is round_robin
-            dist_policy_map = 'round-robin'
-            
-        #
-        # @bksysnet: Build the mapping and policy
-        # TODO: this policy varies among scenarios 
-        #       the default policy is provided with one proxy_pass
-        #       In the multi alternatives of proxy_pass then
-        #       the policy is applied to identify the highes matching
-        #       proxy_pass
-        #
-        if len(proxy_map.get(host,[])) == 1:
-            routes[host] = (proxy_map.get(host,[])[0], dist_policy_map)
-        # esle if:
-        #         TODO:  apply further policy matching here
-        #
+        headers = {}
+        for name, value in re.findall(
+            r"proxy_set_header\s+([^\s;]+)\s+([^;]+);", block
+        ):
+            name = name.strip()
+            value = value.strip()
+            if not _HEADER_NAME_RE.fullmatch(name):
+                raise ValueError(
+                    "invalid proxy_set_header name for host {!r}: {!r}".format(
+                        host, name
+                    )
+                )
+            if _CONTROL_RE.search(value):
+                raise ValueError(
+                    "invalid proxy_set_header value for host {!r}".format(host)
+                )
+            headers[name] = value
+
+        policy_match = re.search(
+            r"dist_policy\s+([A-Za-z0-9_-]+)", block
+        )
+        policy = _normalize_policy(
+            policy_match.group(1) if policy_match else "round-robin"
+        )
+
+        existing = routes.get(host)
+        if existing is None:
+            routes[host] = (
+                targets[0] if len(targets) == 1 else targets,
+                policy,
+                headers,
+            )
         else:
-            routes[host] = (proxy_map.get(host,[]), dist_policy_map)
+            old_targets, old_policy, old_headers = existing
+            combined = _target_list(old_targets) + targets
+            combined = list(dict.fromkeys(combined))
+            old_headers.update(headers)
+            routes[host] = (
+                combined[0] if len(combined) == 1 else combined,
+                policy or old_policy,
+                old_headers,
+            )
 
-    for key, value in routes.items():
-        print(key, value)
     return routes
 
 
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="Proxy",
+        description="StreapRous reverse proxy",
+        epilog="Proxy daemon",
+    )
+    parser.add_argument("--server-ip", default="0.0.0.0")
+    parser.add_argument("--server-port", type=int, default=PROXY_PORT)
+    parser.add_argument("--config", default=DEFAULT_CONFIG)
+    args = parser.parse_args(argv)
+
+    try:
+        routes = parse_virtual_hosts(args.config)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
+
+    create_proxy(args.server_ip, args.server_port, routes)
+    return 0
+
+
 if __name__ == "__main__":
-    """
-    Entry point for launching the proxy server.
-
-    This block parses command-line arguments to determine the server's IP address
-    and port. It then calls `create_backend(ip, port)` to start the RESTful
-    application server.
-
-    :arg --server-ip (str): IP address to bind the server (default: 127.0.0.1).
-    :arg --server-port (int): Port number to bind the server (default: 9000).
-    """
-
-    parser = argparse.ArgumentParser(prog='Proxy', description='', epilog='Proxy daemon')
-    parser.add_argument('--server-ip', default='0.0.0.0')
-    parser.add_argument('--server-port', type=int, default=PROXY_PORT)
- 
-    args = parser.parse_args()
-    ip = args.server_ip
-    port = args.server_port
-
-    routes = parse_virtual_hosts("config/proxy.conf")
-
-    create_proxy(ip, port, routes)
+    sys.exit(main())

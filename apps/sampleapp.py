@@ -74,15 +74,15 @@ async def hello(headers, body):
     :param headers (str): The request headers or user identifier.
     :param body (str): The request body or message payload.
     """
-    print("[SampleApp] ['PUT'] **ASYNC** Hello in {} to {}".format(headers, body))
+    print(f"[SampleApp] ['PUT'] **ASYNC** Hello in {headers} to {body}")
     data =  {"id": 1, "name": "Alice", "email": "alice@example.com"}
 
     # Convert to JSON string
     json_str = json.dumps(data)
     return (json_str.encode("utf-8"))
 
-def create_sampleapp(ip, port):
+def create_sampleapp(ip, port, transport=None):
     # Prepare and launch the RESTful application
     app.prepare_address(ip, port)
-    app.run()
+    app.run(transport=transport)
 

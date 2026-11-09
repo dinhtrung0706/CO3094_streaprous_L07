@@ -1054,3 +1054,8 @@ class HttpAdapter:
             headers["Proxy-Authorization"] = (username, password)
             
         return headers
+
+
+# Public aliases used by the reverse proxy for request framing.
+BufferedReader = _BufferedReader
+CONTINUE_RESPONSE = _CONTINUE_RESPONSE

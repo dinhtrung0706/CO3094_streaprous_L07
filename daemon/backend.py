@@ -182,39 +182,64 @@ async def async_server(ip="0.0.0.0", port=7000, routes=None):
             await asyncio.Future()
     finally:
         server.close()
-        await server.wait_closed()
+        wait_closed = getattr(server, "wait_closed", None)
+        if wait_closed is not None:
+            await wait_closed()
     return
 
 
-def run_backend(ip, port, routes, interface=None):
+def run_backend(ip, port, routes, interface=None, transport=None):
     """
-    Starts the backend server, binds to the specified IP and port, and listens for incoming
-    connections using streaprous_raw_connection for external IPs or standard sockets for localhost.
-    Each connection is handled in a separate thread.
+    Starts the backend server using an explicit or automatic transport.
+
+    transport:
+      - None / "auto": standard TCP on loopback, raw sockets elsewhere
+      - "standard": standard TCP
+      - "raw": raw streaprous transport
+      - "async" / "asyncio" / "coroutine": asyncio server
 
     :param ip (str): IP address to bind the server.
     :param port (int): Port number to listen on.
     :param routes (dict): Dictionary of route handlers.
-    :param interface (str, optional): Network interface to bind to. Defaults to platform default.
+    :param interface (str, optional): Network interface for the raw transport.
+    :param transport (str, optional): Backend transport selection.
     """
-    # This global variable to configure the asynchrnous mode or not
     global mode_async
 
-    print(f"[Backend] run_backend with routes={routes}")
-    # Process async stream for registering the service and terminate
-    if mode_async == "coroutine":
+    selected = (transport or "auto").strip().lower()
+    if selected not in (
+        "auto",
+        "standard",
+        "raw",
+        "async",
+        "asyncio",
+        "coroutine",
+    ):
+        raise ValueError(f"unknown backend transport: {transport!r}")
 
-       _run_coroutine(async_server(ip, port, routes))
-       return
+    print(f"[Backend] run_backend transport={selected} routes={routes}")
+    is_localhost = (
+        ip == "127.0.0.1"
+        or ip == "::1"
+        or ip.startswith("127.")
+        or ip == "localhost"
+    )
 
-    # Check if IP is localhost/loopback
-    is_localhost = (ip == "127.0.0.1" or ip == "::1" or ip.startswith("127.") or ip == "localhost")
-    
-    if is_localhost:
+    if selected in ("async", "asyncio", "coroutine") or (
+        selected == "auto" and mode_async == "coroutine"
+    ):
+        _run_coroutine(async_server(ip, port, routes))
+        return
+
+    if selected == "standard":
         run_backend_standard(ip, port, routes)
         return
 
-    # Auto-detect interface if not provided
+    if selected == "auto" and is_localhost:
+        run_backend_standard(ip, port, routes)
+        return
+
+    # Auto-detect interface if not provided.
     if interface is None:
         from start_backend import detect_interface
         interface = detect_interface(ip)
@@ -314,16 +339,17 @@ def run_backend_standard(ip, port, routes):
     except Exception as e:
       print(f"Error: {e}")
 
-def create_backend(ip, port, routes=None, interface=None):
+def create_backend(ip, port, routes=None, interface=None, transport=None):
     """
     Entry point for creating and running the backend server.
 
     :param ip (str): IP address to bind the server.
     :param port (int): Port number to listen on.
-    :param routes (dict, optional): Dictionary of route handlers. Defaults to empty dict.
-    :param interface (str, optional): Network interface to bind to. Defaults to platform default.
+    :param routes (dict, optional): Dictionary of route handlers.
+    :param interface (str, optional): Network interface for the raw transport.
+    :param transport (str, optional): auto, standard, raw, or async.
     """
 
     if routes is None:
         routes = {}
-    run_backend(ip, port, routes, interface)
+    run_backend(ip, port, routes, interface, transport)

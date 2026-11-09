@@ -182,7 +182,24 @@ class RunTests(unittest.TestCase):
         with patch("daemon.streaprous.create_backend") as start:
             app.run(transport="raw", interface="lo0")
         start.assert_called_once_with(
-            "127.0.0.1", 9000, app.routes, interface="lo0"
+            "127.0.0.1",
+            9000,
+            app.routes,
+            interface="lo0",
+            transport="raw",
+        )
+
+    def test_run_auto(self):
+        app = StreapRous()
+        app.prepare_address("127.0.0.1", 9000)
+        with patch("daemon.streaprous.create_backend") as start:
+            app.run(transport="auto")
+        start.assert_called_once_with(
+            "127.0.0.1",
+            9000,
+            app.routes,
+            interface=None,
+            transport="auto",
         )
 
     def test_run_async(self):

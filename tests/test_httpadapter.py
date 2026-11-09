@@ -1052,8 +1052,10 @@ class CompatibilityTests(unittest.TestCase):
             daemon=True,
         )
         with patch.object(config, "SOCKET_TIMEOUT", 0.05):
-            thread.start()
+            # Put the partial request in the socket buffer before the server
+            # thread starts so the test does not race the idle timeout.
             client.sendall(b"GET / HTTP/1.1\r\n")
+            thread.start()
             client.settimeout(2.0)
             data = b""
             while True:
