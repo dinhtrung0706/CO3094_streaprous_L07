@@ -17,16 +17,11 @@ except ImportError:
 
 
 def get_auth_from_url(url):
-    """Given a url with authentication components, extract them into a tuple of
-    username,password.
-
-    :rtype: (str,str)
-    """
-    parsed = urlparse(url)
-
-    try:
-        auth = (unquote(parsed.username), unquote(parsed.password))
-    except (AttributeError, TypeError):
-        auth = ("", "")
-
-    return auth
+    """Extract (username, password) from a URL, or ('', '') if absent."""
+    parsed = urlparse(str(url or ""))
+    if parsed.username is None:
+        return ("", "")
+    return (
+        unquote(parsed.username),
+        unquote(parsed.password or ""),
+    )

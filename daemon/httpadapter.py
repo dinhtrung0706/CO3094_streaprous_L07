@@ -24,6 +24,7 @@ daemon.request and response construction lives in daemon.response.
 """
 
 import asyncio
+import base64
 import inspect
 import logging
 import re
@@ -48,6 +49,7 @@ from .errors import (
 )
 from .request import Request
 from .response import Response
+from .utils import get_auth_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -1033,26 +1035,18 @@ class HttpAdapter:
         pass
 
     def build_proxy_headers(self, proxy):
-        """Returns a dictionary of the headers to add to any request sent
-        through a proxy. 
-
-        :class:`HttpAdapter <HttpAdapter>`.
-
-        :param proxy: The url of the proxy being used for this request.
-        :rtype: dict
-        """
+        """Return headers to attach to requests sent through ``proxy``."""
         headers = {}
-        #
-        # TODO: build your authentication here
-        #       username, password =...
-        # we provide dummy auth here
-        #
-        
-        username, password = ("user1", "password")
+        if not proxy:
+            return headers
 
+        username, password = get_auth_from_url(proxy)
         if username:
-            headers["Proxy-Authorization"] = (username, password)
-            
+            token = base64.b64encode(
+                f"{username}:{password}".encode("utf-8")
+            ).decode("ascii")
+            headers["Proxy-Authorization"] = f"Basic {token}"
+
         return headers
 
 

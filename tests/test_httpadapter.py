@@ -1020,8 +1020,20 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_build_proxy_headers(self):
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
-        headers = adapter.build_proxy_headers("http://proxy")
-        self.assertIn("Proxy-Authorization", headers)
+        self.assertEqual(adapter.build_proxy_headers(""), {})
+        self.assertEqual(adapter.build_proxy_headers("http://proxy:8080"), {})
+        headers = adapter.build_proxy_headers(
+            "http://user1:password@proxy:8080"
+        )
+        self.assertEqual(
+            headers,
+            {"Proxy-Authorization": "Basic dXNlcjE6cGFzc3dvcmQ="},
+        )
+        user_only = adapter.build_proxy_headers("http://user1@proxy:8080")
+        self.assertEqual(
+            user_only,
+            {"Proxy-Authorization": "Basic dXNlcjE6"},
+        )
 
     def test_single_positional_arg_custom_name_handler(self):
         def custom(req_obj):
