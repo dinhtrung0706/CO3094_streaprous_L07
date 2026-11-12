@@ -19,6 +19,7 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 VALID_LANES = (CONTROL, MESSAGE, FILE)
 VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE)
+MAX_ACK_RANGES = 16
 
 
 def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
@@ -139,3 +140,56 @@ def parse_buffer(data: bytes):
         packet_seq, rwnd, bytes(data[HEADER_SIZE:total_size])
     )
     return packet, data[total_size:]
+
+
+def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
+    """
+    Encode ordered, half-open ACK ranges into bytes.
+    Args:
+        ranges: A list of (start, end) sequence ranges.
+
+    Returns:
+        One-byte range count followed by 32-bit start/end pairs.
+    """
+    if len(ranges) > MAX_ACK_RANGES:
+        raise ValueError("Too many ACK ranges")
+
+    data = bytearray([len(ranges)])
+    previous_end = -1
+    for start, end in ranges:
+        if (not isinstance(start, int) or not isinstance(end, int)
+                or not 0 <= start < end <= 0xFFFFFFFF
+                or start < previous_end):
+            raise ValueError("Invalid ACK range")
+        data.extend(struct.pack("!II", start, end))
+        previous_end = end
+
+    return bytes(data)
+
+
+def decode_ack_ranges(data: bytes) -> list[tuple[int, int]]:
+    """
+    Decode and validate ACK ranges from a packet payload.
+    Args:
+        data: Encoded range count and 32-bit start/end pairs.
+
+    Returns:
+        A list of ordered, half-open ACK ranges.
+    """
+    if not data:
+        raise ValueError("Missing ACK range count")
+
+    count = data[0]
+    if count > MAX_ACK_RANGES or len(data) != 1 + count * 8:
+        raise ValueError("Invalid ACK range payload length")
+
+    ranges = []
+    previous_end = -1
+    for index in range(count):
+        start, end = struct.unpack_from("!II", data, 1 + index * 8)
+        if start >= end or start < previous_end:
+            raise ValueError("Invalid ACK range")
+        ranges.append((start, end))
+        previous_end = end
+
+    return ranges
