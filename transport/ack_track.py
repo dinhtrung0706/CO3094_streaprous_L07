@@ -81,3 +81,16 @@ class ACKTracker:
         with self._ack_windows_lock:
             index, result = _binsearch_placement(ack_seq, self._ack_windows, 0, len(self._ack_windows))
             return result and ack_seq != self._ack_windows[index][1]
+
+    def get_ranges(self) -> list[tuple[int, int]]:
+        """
+        Return a snapshot of the acknowledged sequence ranges.
+
+        Args:
+            self: The ACK tracker.
+
+        Returns:
+            A copy of the stored half-open ACK ranges.
+        """
+        with self._ack_windows_lock:
+            return list(self._ack_windows)
