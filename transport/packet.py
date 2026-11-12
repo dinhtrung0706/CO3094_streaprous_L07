@@ -1,4 +1,6 @@
-"""Encode and decode framed CONTROL, MESSAGE, and FILE packets."""
+"""
+Encode and decode framed CONTROL, MESSAGE, and FILE packets.
+"""
 
 import struct
 from dataclasses import dataclass
@@ -23,7 +25,8 @@ MAX_ACK_RANGES = 16
 
 
 def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
-    """Check that every header field has a valid value.
+    """
+    Check that every header field has a valid value.
 
     Args:
         version: Protocol version.
@@ -59,7 +62,9 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
 
 @dataclass
 class Packet:
-    """Represent one framed transport packet."""
+    """
+    Represent one framed transport packet.
+    """
 
     version: int
     lane: int
@@ -71,7 +76,8 @@ class Packet:
     payload: bytes = b""
 
     def encode(self) -> bytes:
-        """Serialize this packet into a header and payload.
+        """
+        Serialize this packet into a header and payload.
 
         Args:
             self: Packet to serialize.
@@ -95,7 +101,8 @@ class Packet:
 
     @classmethod
     def decode(cls, data: bytes):
-        """Decode exactly one complete packet.
+        """
+        Decode exactly one complete packet.
 
         Args:
             cls: Packet class to construct.
@@ -113,7 +120,8 @@ class Packet:
 
 
 def parse_buffer(data: bytes):
-    """Extract one complete packet from a byte buffer.
+    """
+    Extract one complete packet from a byte buffer.
 
     Args:
         data: Received bytes, possibly containing multiple frames.
@@ -145,6 +153,7 @@ def parse_buffer(data: bytes):
 def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
     """
     Encode ordered, half-open ACK ranges into bytes.
+
     Args:
         ranges: A list of (start, end) sequence ranges.
 
@@ -170,6 +179,7 @@ def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
 def decode_ack_ranges(data: bytes) -> list[tuple[int, int]]:
     """
     Decode and validate ACK ranges from a packet payload.
+
     Args:
         data: Encoded range count and 32-bit start/end pairs.
 

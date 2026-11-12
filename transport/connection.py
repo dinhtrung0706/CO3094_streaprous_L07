@@ -1,4 +1,6 @@
-"""Connection provide raw TCP send and receive operations."""
+"""
+Provide raw TCP send and receive operations.
+"""
 
 from streaprous_socket.streaprous_raw_connection import (
     conn_struct,
@@ -8,7 +10,9 @@ from streaprous_socket.streaprous_raw_connection import (
 
 
 class Connection:
-    """Store connection details and exchange raw TCP payloads with a peer."""
+    """
+    Store connection details and exchange raw TCP payloads with a peer.
+    """
 
     def __init__(
             self,
@@ -26,7 +30,8 @@ class Connection:
             rwnd,
             handshake_rtt
     ):
-        """Initialize a connection using its established TCP state.
+        """
+        Initialize a connection using its established TCP state.
 
         Args:
             socket: Raw TCP socket.
@@ -43,6 +48,8 @@ class Connection:
             rwnd: Initial receive window.
             handshake_rtt: Round-trip time measured during handshake.
 
+        Returns:
+            None.
         """
         self._socket = socket
         self._client_ip = client_ip
