@@ -5,6 +5,7 @@ Buffers for sending and assembling transport data.
 import errno
 import threading
 
+from .ack_track import lseq_distance, lseq_next, lseq_range, newer
 from .constant import (
     MAX_SEGMENT_SIZE,
     MAX_RECEIVE_BUFFER,
@@ -33,7 +34,7 @@ class SendBuffer:
         """
         Advance the logical sequence number with wraparound.
         """
-        self._lseq = (self._lseq + 1) & MASK_LSEQ
+        self._lseq = lseq_next(self._lseq)
 
     def acquire_send_data(self):
         """
@@ -89,9 +90,10 @@ class ReceiveBuffer:
             RECV_FULL when capacity is exhausted, or RECV_ERROR for invalid data.
         """
         with self._rbuffer_lock:
-            if logical_seq < 0:
+            if not 0 <= logical_seq <= MASK_LSEQ:
                 return RECV_ERROR
-            if logical_seq < self._s6t_unacked_seq:
+            if (logical_seq != self._s6t_unacked_seq
+                    and not newer(logical_seq, self._s6t_unacked_seq)):
                 return RECV_DUPLICATE
 
             if logical_seq in self._chunks:
@@ -107,7 +109,6 @@ class ReceiveBuffer:
 
             if is_last and logical_seq not in self._last_seq:
                 self._last_seq.append(logical_seq)
-                self._last_seq.sort()
 
             return status
 
@@ -129,7 +130,7 @@ class ReceiveBuffer:
             while end_seq in self._chunks:
                 if len(self._chunks[end_seq]) > MAX_SEGMENT_SIZE:
                     return RECV_ERROR
-                end_seq += 1
+                end_seq = lseq_next(end_seq)
 
             if end_seq == start_seq:
                 return RECV_WAITING
@@ -137,7 +138,7 @@ class ReceiveBuffer:
             try:
                 output.seek(0, 2)
                 start = output.tell()
-                for seq in range(start_seq, end_seq):
+                for seq in lseq_range(start_seq, end_seq):
                     data = self._chunks[seq]
                     if output.write(data) != len(data):
                         raise OSError(errno.ENOSPC, "Incomplete file write")
@@ -152,9 +153,9 @@ class ReceiveBuffer:
                     return RECV_ERROR
                 return RECV_ERROR
 
-            for seq in range(start_seq, end_seq):
+            for seq in lseq_range(start_seq, end_seq):
                 self._received_bytes -= len(self._chunks.pop(seq))
-            self._last_seq = [seq for seq in self._last_seq if seq >= end_seq]
+            self._last_seq = [seq for seq in self._last_seq if seq in self._chunks]
             self._s6t_unacked_seq = end_seq
             return start_seq, end_seq
 
@@ -189,12 +190,16 @@ class ReceiveBuffer:
             if not self._last_seq:
                 return None
 
-            end = self._last_seq[0]
-            if any(seq not in self._chunks for seq in range(self._s6t_unacked_seq, end + 1)):
+            end = min(
+                self._last_seq,
+                key=lambda seq: lseq_distance(seq, self._s6t_unacked_seq),
+            )
+            sequences = lseq_range(self._s6t_unacked_seq, lseq_next(end))
+            if any(seq not in self._chunks for seq in sequences):
                 return None
 
-            data = b"".join(self._chunks.pop(seq) for seq in range(self._s6t_unacked_seq, end + 1))
+            data = b"".join(self._chunks.pop(seq) for seq in sequences)
             self._received_bytes -= len(data)
-            self._s6t_unacked_seq = end + 1
-            self._last_seq.pop(0)
+            self._s6t_unacked_seq = lseq_next(end)
+            self._last_seq.remove(end)
             return data
