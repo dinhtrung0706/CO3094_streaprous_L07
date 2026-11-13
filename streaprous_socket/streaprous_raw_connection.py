@@ -33,8 +33,8 @@ import netifaces
 # Import streaprout packet dispatcher functions
 from .streaprous_packet_dispatcher import (
     _SYN_KEY,
-    _packet_dispatcher_lock,
     get_packet_queue,
+    packet_dispatcher_lock,
     remove_packet_queue,
     start_packet_dispatcher,
     stop_packet_dispatcher,

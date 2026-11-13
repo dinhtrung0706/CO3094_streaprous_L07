@@ -30,7 +30,7 @@ _TIMEOUT_ERRORS = (socket.timeout, TimeoutError)
 _packet_queues = {}
 _packet_dispatcher_thread = None
 _packet_dispatcher_running = False
-_packet_dispatcher_lock = threading.Lock()
+packet_dispatcher_lock = threading.Lock()
 _current_listen_port = None
 _current_raw_socket = None
 
@@ -46,7 +46,7 @@ def _packet_dispatcher(s, listen_port):
     """
     global _packet_dispatcher_running
 
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         if _packet_dispatcher_thread is None:
             _packet_dispatcher_running = True
 
@@ -97,7 +97,7 @@ def _packet_dispatcher(s, listen_port):
                 is_ack = bool(flags & 0x10)
                 key = (socket.inet_ntoa(packet[12:16]), src_port)
 
-                with _packet_dispatcher_lock:
+                with packet_dispatcher_lock:
                     client_queue = _packet_queues.get(key)
                     if client_queue is not None:
                         target = client_queue
@@ -132,7 +132,7 @@ def _packet_dispatcher(s, listen_port):
                     f"[Sock_dispatcher] Dispatcher error: {exc}"
                 )
     finally:
-        with _packet_dispatcher_lock:
+        with packet_dispatcher_lock:
             if (
                 _packet_dispatcher_thread is None
                 or _packet_dispatcher_thread is threading.current_thread()
@@ -153,7 +153,7 @@ def start_packet_dispatcher(s, listen_port):
     global _current_raw_socket
 
     old_thread = None
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         if (
             _packet_dispatcher_running
             and _packet_dispatcher_thread is not None
@@ -175,7 +175,7 @@ def start_packet_dispatcher(s, listen_port):
     ):
         old_thread.join(timeout=2.0)
 
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         _packet_dispatcher_running = True
         _current_raw_socket = s
         _current_listen_port = listen_port
@@ -199,7 +199,7 @@ def stop_packet_dispatcher():
     global _current_listen_port
     global _current_raw_socket
 
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         _packet_dispatcher_running = False
         thread = _packet_dispatcher_thread
         _packet_dispatcher_thread = None
@@ -223,7 +223,7 @@ def get_packet_queue(client_key):
     Returns:
         A bounded ``queue.Queue`` instance for ``client_key``.
     """
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         if client_key not in _packet_queues:
             _packet_queues[client_key] = queue.Queue(
                 maxsize=DEFAULT_QUEUE_MAXSIZE
@@ -237,5 +237,5 @@ def remove_packet_queue(client_key):
     Args:
         client_key: ``(client_ip, client_port)`` or ``_SYN_KEY`` tuple.
     """
-    with _packet_dispatcher_lock:
+    with packet_dispatcher_lock:
         _packet_queues.pop(client_key, None)
