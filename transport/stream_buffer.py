@@ -7,7 +7,8 @@ import threading
 
 from .constant import (
     MAX_SEGMENT_SIZE,
-    MASK_SEQ_NR,
+    MAX_RECEIVE_BUFFER,
+    MASK_LSEQ,
     RECV_STORED,
     RECV_DUPLICATE,
     RECV_FULL,
@@ -32,7 +33,7 @@ class SendBuffer:
         """
         Advance the logical sequence number with wraparound.
         """
-        self._lseq = (self._lseq + 1) & MASK_SEQ_NR
+        self._lseq = (self._lseq + 1) & MASK_LSEQ
 
     def acquire_send_data(self):
         """
@@ -60,7 +61,7 @@ class SendBuffer:
 
 
 class ReceiveBuffer:
-    def __init__(self, capacity=65535):
+    def __init__(self, capacity=MAX_RECEIVE_BUFFER):
         """
         Store received chunks and the ends of queued messages.
 
@@ -156,6 +157,16 @@ class ReceiveBuffer:
             self._last_seq = [seq for seq in self._last_seq if seq >= end_seq]
             self._s6t_unacked_seq = end_seq
             return start_seq, end_seq
+
+    def buffered_size(self) -> int:
+        """
+        Return the number of payload bytes currently held in memory.
+
+        Returns:
+            Buffered payload size in bytes.
+        """
+        with self._rbuffer_lock:
+            return self._received_bytes
 
     def available_capacity(self) -> int:
         """
