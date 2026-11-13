@@ -101,7 +101,7 @@ class Transmitter:
 
             attempts.append(time.monotonic())
 
-        return session.send(packet_key)
+        return session.retransmit_packet(packet_key)
 
     def _on_deadline(self, session, current_time = None):
         """
@@ -138,7 +138,7 @@ class Transmitter:
             session._ccontrol.on_timeout()
 
             for packet_key in retransmit_packets:
-                session.send(packet_key)
+                session.retransmit_packet(packet_key)
 
     def _deadline_loop(self, session):
         # We approximate the waiting time instead of execute every time
