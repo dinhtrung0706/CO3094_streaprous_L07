@@ -118,8 +118,9 @@ class ReceiveBuffer:
             output: Open binary file supporting seek() and truncate().
 
         Returns:
-            Flushed half-open sequence range, or RECV_WAITING when there is nothing to be flushed,
-            RECV_FULL, or RECV_ERROR when there is error (out-of-space fs or general unexpected error) thus nothing was flushed.
+            Flushed half-open sequence range
+            or RECV_WAITING when there is nothing to be flushed,
+            or RECV_ERROR when there is unexpected error thus nothing was flushed (inspect further in the function).
         """
         with self._rbuffer_lock:
             start_seq = self._s6t_unacked_seq
@@ -140,14 +141,14 @@ class ReceiveBuffer:
                     if output.write(data) != len(data):
                         raise OSError(errno.ENOSPC, "Incomplete file write")
                 output.flush()
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError):
+                print(f"[ReceiveBuffer] Unexpected error happened when trying to flush fromm the buffer to the file.")
                 try:
                     output.seek(start)
                     output.truncate()
                 except (OSError, ValueError, UnboundLocalError):
+                    print(f"[ReceiveBuffer] Unexpected error happened when trying to revert the file when early error occur.")
                     return RECV_ERROR
-                if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
-                    return RECV_FULL
                 return RECV_ERROR
 
             for seq in range(start_seq, end_seq):
