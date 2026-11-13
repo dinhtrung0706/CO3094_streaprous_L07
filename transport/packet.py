@@ -189,6 +189,9 @@ def decode_ack_ranges(data: bytes) -> list[tuple[int, int]]:
     if not data:
         raise ValueError("Missing ACK range count")
 
+    # Each pair has 64 bits = 8 bytes, we skip 8 bytes each previous pair
+    # + 1 is for the 1 byte that hold number of ranges
+    # thus, the general formula is 1 + i * 8 with i is the index
     count = data[0]
     if count > MAX_ACK_RANGES or len(data) != 1 + count * 8:
         raise ValueError("Invalid ACK range payload length")
