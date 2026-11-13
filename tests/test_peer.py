@@ -178,14 +178,13 @@ class PeerHarness(unittest.TestCase):
         self.assertEqual(bob_service.messages(self.channel_id), [])
         self.assertGreaterEqual(bob.stats["rejected"], 1)
 
-    def test_status_and_channel_stats_are_json_safe(self):
+    def test_status_is_json_safe(self):
         tracker_service = self.make_service("tracker")
         alice_service = self.make_service("alice")
         tracker = self.make_node(tracker_service, "tracker", role="tracker")
         alice = self.make_node(alice_service, "alice", tracker=tracker.node.address)
         self.assertIn("role", alice.status())
         self.assertEqual(alice.status()["role"], "peer")
-        self.assertIsInstance(alice.channel_stats(), dict)
 
     def test_stop_is_idempotent(self):
         service = self.make_service("alice")

@@ -47,7 +47,6 @@ class PeerNode:
         tick=TICK_SECONDS,
         capacity=DEFAULT_CAPACITY,
         rto=DEFAULT_RTO,
-        cipher=None,
     ):
         if role not in ("peer", "tracker"):
             raise ValueError("role must be 'peer' or 'tracker'")
@@ -56,7 +55,6 @@ class PeerNode:
         self.token = token
         self.verifier = verifier
         self.role = role
-        self.cipher = cipher
         self.tracker = tuple(tracker) if tracker else None
         self.heartbeat_seconds = float(heartbeat)
         self.tick_seconds = float(tick)
@@ -267,14 +265,9 @@ class PeerNode:
         }
 
     def _encode_payload(self, envelope):
-        data = protocol.encode_message(envelope, self.token)
-        if self.cipher is not None:
-            data = self.cipher.seal(data)
-        return data
+        return protocol.encode_message(envelope, self.token)
 
     def _decode_payload(self, payload):
-        if self.cipher is not None:
-            payload = self.cipher.open(payload)
         return protocol.decode_message(payload)
 
     def _on_frame(self, frame, address):
@@ -442,13 +435,6 @@ class PeerNode:
 
     def _handle_auth_error(self, frame, address):
         logger.warning("peer %s rejected our token", address)
-
-    def channel_stats(self):
-        with self._lock:
-            return {
-                str(address): channel.stats()
-                for address, channel in self._channels.items()
-            }
 
     def status(self):
         result = dict(self.stats)

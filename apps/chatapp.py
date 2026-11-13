@@ -1,7 +1,6 @@
 """Chat app: JSON control plane plus the UDP peer node."""
 
 import functools
-import logging
 import os
 
 from daemon.auth import install_auth
@@ -12,24 +11,6 @@ from daemon.response import Response
 from daemon.streaprous import StreapRous
 
 DEFAULT_DB = os.path.join("data", "chat.sqlite3")
-logger = logging.getLogger(__name__)
-
-
-def _payload_cipher():
-    """Build an AES-GCM cipher when STREAPROUS_CHAT_KEY is configured."""
-    secret = os.environ.get("STREAPROUS_CHAT_KEY")
-    if not secret:
-        return None
-    from daemon import crypto
-
-    if not crypto.available():
-        logger.warning(
-            "STREAPROUS_CHAT_KEY is set but 'cryptography' is missing; "
-            "peer payloads will be sent in plaintext"
-        )
-        return None
-    return crypto.PayloadCipher.from_secret(secret)
-
 
 
 def _api(view):
@@ -108,7 +89,6 @@ def build_chatapp(
         node_user = username or ("tracker" if mode == "tracker" else None)
         if not node_user:
             raise ValueError("username is required for peer mode")
-        cipher = _payload_cipher()
         peer = PeerNode(
             chat,
             username=node_user,
@@ -119,7 +99,6 @@ def build_chatapp(
             public_ip=public_ip,
             tracker=tracker,
             heartbeat=heartbeat,
-            cipher=cipher,
         )
         peer.start()
     app._streaprous_peer = peer
@@ -132,13 +111,6 @@ def build_chatapp(
             "node": peer.status() if peer is not None else None,
             "channels": len(chat.list_channels(user_id=0)),
         }
-
-    @app.route("/api/status/channels", methods=["GET"], auth=True)
-    @_api
-    def channel_stats(request):
-        if peer is None:
-            return {"channels": {}}
-        return {"channels": peer.channel_stats()}
 
     @app.route("/api/channels", methods=["GET"], auth=True)
     @_api
