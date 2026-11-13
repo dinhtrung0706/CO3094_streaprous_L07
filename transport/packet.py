@@ -5,6 +5,8 @@ Encode and decode framed CONTROL, MESSAGE, and FILE packets.
 import struct
 from dataclasses import dataclass
 
+from .constant import MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES
+
 VERSION = 1
 
 CONTROL = 0
@@ -21,7 +23,6 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 VALID_LANES = (CONTROL, MESSAGE, FILE)
 VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE)
-MAX_ACK_RANGES = 16
 
 
 def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
@@ -48,9 +49,9 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
     if flags not in VALID_FLAGS:
         raise ValueError("Invalid packet flags")
     for value, maximum in (
-        (logical_seq, 0xFFFF),
-        (ack_seq, 0xFFFF),
-        (packet_seq, 0xFFFFFFFF),
+        (logical_seq, MASK_LSEQ),
+        (ack_seq, MASK_LSEQ),
+        (packet_seq, MASK_PSEQ),
         (rwnd, 0xFFFF),
         (payload_len, 0xFFFF),
     ):
@@ -167,7 +168,7 @@ def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
     previous_end = -1
     for start, end in ranges:
         if (not isinstance(start, int) or not isinstance(end, int)
-                or not 0 <= start < end <= 0xFFFFFFFF
+                or not 0 <= start < end <= MASK_PSEQ
                 or start < previous_end):
             raise ValueError("Invalid ACK range")
         data.extend(struct.pack("!II", start, end))

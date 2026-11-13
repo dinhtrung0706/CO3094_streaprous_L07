@@ -4,6 +4,8 @@ ACK tracker to ease the tracking ACKed or not ACKed packets process
 
 import threading
 
+from .constant import MAX_ACK_RANGES
+
 def _binsearch_placement(key, arr, start, end) -> tuple[int, bool]:
     """
     Binary search for the placement of key in the array of ranges.
@@ -90,7 +92,7 @@ class ACKTracker:
             self: The ACK tracker.
 
         Returns:
-            A copy of the stored half-open ACK ranges.
+            Up to MAX_ACK_RANGES earliest acknowledged ranges.
         """
         with self._ack_windows_lock:
-            return list(self._ack_windows)
+            return list(self._ack_windows[:MAX_ACK_RANGES])
