@@ -21,7 +21,7 @@ class Transmitter:
         self._time_lock = threading.Lock()
 
         self._max_nr_retries = max_nr_retries
-        self._pktmeta = {} # logical_seq : [timestamp]
+        self._pktmeta = {} # {packet_key : [timestamp]}
         self._drop_list = []
         self._list_lock = threading.Lock()
 
@@ -29,21 +29,36 @@ class Transmitter:
         self._stop = threading.Event()
         self._thread_lock = threading.Lock()
 
-    def register_packet(self, logical_seq, timestamp):
-        with self._list_lock:
-            if logical_seq in self._pktmeta:
-                print(f"[Transmitter] packet's metadata has already been registered, packet's logical sequence: {logical_seq}")
-                return
-            self._pktmeta[logical_seq] = [timestamp]
+    def register_packet(self, packet_key, timestamp):
+        """
+        Store the initial send time for a logical packet.
 
-    def acking_packet(self, logical_seq):
+        Args:
+            packet_key: Lane, transfer ID, and logical sequence.
+            timestamp: Initial send time.
+        """
+        with self._list_lock:
+            if packet_key in self._pktmeta:
+                print(f"[Transmitter] Packet is already registered: {packet_key}")
+                return
+            self._pktmeta[packet_key] = [timestamp]
+
+    def acking_packet(self, packet_key):
+        """
+        Mark a logical packet acknowledged and update RTT when eligible.
+
+        Args:
+            packet_key: Lane, transfer ID, and logical sequence.
+
+        Returns:
+            True if registered, False if the packet is unknown.
+        """
         current_time = time.monotonic()
         with self._list_lock:
-            attempts = self._pktmeta.pop(logical_seq, None)
+            attempts = self._pktmeta.pop(packet_key, None)
 
-        # Why acking the ghost logical sequence number ?
         if attempts is None:
-            print(f"[Transmitter] Warning you try to ack packet that has sequence number: {logical_seq}, which does not exist.")
+            print(f"[Transmitter] Unknown acknowledged packet: {packet_key}")
             return False
 
         if len(attempts) > 1:
@@ -64,9 +79,19 @@ class Transmitter:
         with self._time_lock:
             return self._srtt / nr_packets
 
-    def _retransmit(self, session, logical_seq):
+    def _retransmit(self, session, packet_key):
+        """
+        Retry a pending logical packet within its retry limit.
+
+        Args:
+            session: Session that owns the packet.
+            packet_key: Lane, transfer ID, and logical sequence.
+
+        Returns:
+            True if a retry was initiated, otherwise False.
+        """
         with self._list_lock:
-            attempts = self._pktmeta.get(logical_seq)
+            attempts = self._pktmeta.get(packet_key)
 
             if attempts is None:
                 return False
@@ -76,13 +101,15 @@ class Transmitter:
 
             attempts.append(time.monotonic())
 
-        session.send(logical_seq)
-        return True
+        return session.send(packet_key)
 
     def _on_deadline(self, session, current_time = None):
         """
-        Main flow of the retransmitter thread.
-        Only one thread calls this at a time.
+        Find timed-out logical packets and request retransmission.
+
+        Args:
+            session: Session that owns the pending packets.
+            current_time: Time used to check retransmission deadlines.
         """
         current_time = current_time if current_time is not None else time.monotonic()
         retransmit_packets = []
@@ -90,18 +117,18 @@ class Transmitter:
             rto = self._rto
 
         with self._list_lock:
-            for lseq, attempts in list(self._pktmeta.items()):
+            for packet_key, attempts in list(self._pktmeta.items()):
                 if current_time - attempts[-1] < rto:
                     continue
 
                 if len(attempts) >= 1 + self._max_nr_retries:
                     # Out of retries and the last retransmission packet has timeout
                     # Move it to the drop list
-                    self._drop_list.append(lseq)
-                    del self._pktmeta[lseq]
+                    self._drop_list.append(packet_key)
+                    del self._pktmeta[packet_key]
                 else:
                     attempts.append(current_time)
-                    retransmit_packets.append(lseq)
+                    retransmit_packets.append(packet_key)
 
         if retransmit_packets:
             # Because previous retransmission failed, we increase RTO
@@ -110,8 +137,8 @@ class Transmitter:
 
             session._ccontrol.on_timeout()
 
-            for lseq in retransmit_packets:
-                session.send(lseq)
+            for packet_key in retransmit_packets:
+                session.send(packet_key)
 
     def _deadline_loop(self, session):
         # We approximate the waiting time instead of execute every time
@@ -148,6 +175,13 @@ class Transmitter:
             self._drop_list = []
             return result
 
-    def fast_retransmit(self, session, lseq_list):
-        for logical_seq in lseq_list:
-            self._retransmit(session, logical_seq)
+    def fast_retransmit(self, session, packet_keys):
+        """
+        Retry the requested logical packets after detecting loss.
+
+        Args:
+            session: Session that owns the pending packets.
+            packet_keys: Composite keys of packets to retransmit.
+        """
+        for packet_key in packet_keys:
+            self._retransmit(session, packet_key)
