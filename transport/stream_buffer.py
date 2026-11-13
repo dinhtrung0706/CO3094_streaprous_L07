@@ -71,7 +71,7 @@ class ReceiveBuffer:
         self._received_bytes = 0
         self._chunks = {} # { lseq : data }
         self._last_seq = []
-        self._s6t_unacked_seq = 0
+        self._s6t_unacked_seq = 0 # smallest unacked seq
         self._rbuffer_lock = threading.Lock()
 
     def register_receive_data(self, logical_seq, data: bytes, is_last=False) -> int:
