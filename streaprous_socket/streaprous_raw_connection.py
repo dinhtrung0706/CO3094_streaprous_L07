@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 from collections import namedtuple
+from typing import Optional
 
 import netifaces
 
@@ -328,7 +329,7 @@ def create_raw_socket() -> socket.socket:
         sys.exit(1)
 
 
-def get_interface_ip(interface_name: str | None = None) -> str:
+def get_interface_ip(interface_name: Optional[str] = None) -> str:
     """
     Get the IPv4 address of a network interface.
     
@@ -367,7 +368,8 @@ def get_interface_ip(interface_name: str | None = None) -> str:
         return "127.0.0.1"
 
 
-def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: str | None = None) -> conn_struct:
+
+def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: Optional[str] = None) -> conn_struct:
     """
     Accept a new connection by performing the 3-way handshake using raw sockets.
     Returns a conn_struct tuple for the established connection.
