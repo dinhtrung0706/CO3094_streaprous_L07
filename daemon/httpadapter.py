@@ -30,12 +30,6 @@ import logging
 import re
 import socket
 
-from streaprous_socket.streaprous_raw_connection import (
-    close_connection,
-    run_conn_recv,
-    run_conn_send,
-)
-
 from . import config
 from .errors import (
     BadRequest,
@@ -50,6 +44,32 @@ from .errors import (
 from .request import Request
 from .response import Response
 from .utils import get_auth_from_url
+
+
+def run_conn_recv(raw_socket, conn_info):
+    """Import the raw transport only when the raw path is used."""
+    from streaprous_socket.streaprous_raw_connection import (
+        run_conn_recv as _run_conn_recv,
+    )
+
+    return _run_conn_recv(raw_socket, conn_info)
+
+
+def run_conn_send(raw_socket, conn_info, payload):
+    from streaprous_socket.streaprous_raw_connection import (
+        run_conn_send as _run_conn_send,
+    )
+
+    return _run_conn_send(raw_socket, conn_info, payload)
+
+
+def close_connection(raw_socket, conn_info):
+    from streaprous_socket.streaprous_raw_connection import (
+        close_connection as _close_connection,
+    )
+
+    return _close_connection(raw_socket, conn_info)
+
 
 logger = logging.getLogger(__name__)
 

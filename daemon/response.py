@@ -236,7 +236,7 @@ class Response:
         #: Response protocol version.
         self.http_version = "HTTP/1.1"
         #: None derives from the request; True/False overrides it.
-        self.keep_alive: bool | None = None
+        self.keep_alive = None
         #: URL/target associated with the response.
         self.url = None
         self.history = []

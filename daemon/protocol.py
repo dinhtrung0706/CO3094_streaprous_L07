@@ -7,7 +7,6 @@ import json
 import struct
 import time
 import uuid
-from dataclasses import dataclass
 
 MAGIC = b"SR"
 VERSION = 1
@@ -47,15 +46,33 @@ def frame_type_name(frame_type):
     """Return the symbolic name for a frame type, or ``"UNKNOWN"``."""
     return TYPE_NAMES.get(frame_type, "UNKNOWN")
 
-@dataclass(frozen=True, slots=True)
-class Frame:
+class Frame(object):
     """One decoded protocol frame."""
 
-    type: int
-    seq: int = 0
-    ack: int = 0
-    window: int = DEFAULT_WINDOW
-    payload: bytes = b""
+    __slots__ = ("type", "seq", "ack", "window", "payload")
+
+    def __init__(self, type, seq=0, ack=0, window=DEFAULT_WINDOW, payload=b""):
+        self.type = type
+        self.seq = seq
+        self.ack = ack
+        self.window = window
+        self.payload = payload
+
+    def __repr__(self):
+        return "Frame(type={!r}, seq={!r}, ack={!r}, window={!r}, payload={!r})".format(
+            self.type, self.seq, self.ack, self.window, self.payload
+        )
+
+    def __eq__(self, other):
+        if not isinstance(other, Frame):
+            return NotImplemented
+        return (
+            self.type == other.type
+            and self.seq == other.seq
+            and self.ack == other.ack
+            and self.window == other.window
+            and self.payload == other.payload
+        )
 
     @property
     def name(self):

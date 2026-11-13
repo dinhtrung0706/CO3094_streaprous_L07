@@ -184,7 +184,12 @@ def build_chatapp(
     def list_messages(request):
         channel_id = request.path_params["channel_id"]
         chat.require_member(channel_id, request.user)
-        rows = chat.messages(channel_id, since=_since(request), limit=_limit(request))
+        rows = chat.messages(
+            channel_id,
+            since=_since(request),
+            limit=_limit(request),
+            viewer=request.user["username"],
+        )
         next_since = rows[-1]["seq"] if rows else _since(request)
         return {"messages": rows, "next_since": next_since}
 
@@ -217,11 +222,13 @@ def build_chatapp(
                     )
             except PermissionError:
                 message, _created = chat.post_message(
-                    channel_id, sender, body, message_id=client_id
+                    channel_id, sender, body, message_id=client_id,
+                    recipient=recipient,
                 )
         else:
             message, _created = chat.post_message(
-                channel_id, sender, body, message_id=client_id
+                channel_id, sender, body, message_id=client_id,
+                recipient=recipient,
             )
         return Response().json({"message": message}, status=201)
 

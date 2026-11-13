@@ -4,7 +4,6 @@ import socket
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, replace
 
 from . import protocol
 
@@ -16,14 +15,16 @@ INITIAL_SSTHRESH = 16
 TICK_SECONDS = 0.05
 
 
-@dataclass(slots=True)
-class Pending:
+class Pending(object):
     """One unacknowledged outbound frame."""
 
-    frame: object
-    first_sent: float
-    sent_at: float
-    retries: int = 0
+    __slots__ = ("frame", "first_sent", "sent_at", "retries")
+
+    def __init__(self, frame, first_sent, sent_at, retries=0):
+        self.frame = frame
+        self.first_sent = first_sent
+        self.sent_at = sent_at
+        self.retries = retries
 
 
 class RecvWindow:
@@ -114,7 +115,13 @@ class SendWindow:
             return None
         sequence = self.next_seq
         self.next_seq += 1
-        pending = Pending(replace(frame, seq=sequence), now, now)
+        pending = Pending(
+            protocol.Frame(
+                frame.type, sequence, frame.ack, frame.window, frame.payload
+            ),
+            now,
+            now,
+        )
         self.unacked[sequence] = pending
         self._counters["sent"] += 1
         return pending.frame

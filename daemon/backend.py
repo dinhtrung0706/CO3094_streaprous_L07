@@ -48,19 +48,25 @@ import selectors
 import socket
 import threading
 
-# Import streaprous raw connection
-from streaprous_socket.streaprous_raw_connection import (
-    DEFAULT_INTERFACE_NAME,
-    accept,
-    close_connection,
-    create_raw_socket,
-    run_conn_recv,
-    run_conn_send,
-)
-
 from .dictionary import CaseInsensitiveDict
 from .httpadapter import HttpAdapter
 from .response import *
+
+
+def create_raw_socket():
+    """Import the raw transport only when the raw path is used."""
+    from streaprous_socket.streaprous_raw_connection import (
+        create_raw_socket as _create_raw_socket,
+    )
+
+    return _create_raw_socket()
+
+
+def accept(server, listen_ip, listen_port, interface_name=None):
+    from streaprous_socket.streaprous_raw_connection import accept as _accept
+
+    return _accept(server, listen_ip, listen_port, interface_name)
+
 
 sel = selectors.DefaultSelector()
 

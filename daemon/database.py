@@ -3,7 +3,6 @@
 import os
 import sqlite3
 import threading
-import uuid
 from pathlib import Path
 
 
@@ -35,7 +34,7 @@ class Database:
             self._connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
+                    id INTEGER PRIMARY KEY,
                     username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                     password_hash BLOB NOT NULL,
                     salt BLOB NOT NULL,
@@ -45,7 +44,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS sessions (
                     token_hash BLOB PRIMARY KEY,
-                    user_id TEXT NOT NULL REFERENCES users(id)
+                    user_id INTEGER NOT NULL REFERENCES users(id)
                         ON DELETE CASCADE,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL
@@ -65,7 +64,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS channels (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                    owner_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     is_private INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL
                 );
@@ -73,7 +72,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS channel_members (
                     channel_id TEXT NOT NULL REFERENCES channels(id)
                         ON DELETE CASCADE,
-                    user_id TEXT NOT NULL REFERENCES users(id)
+                    user_id INTEGER NOT NULL REFERENCES users(id)
                         ON DELETE CASCADE,
                     joined_at INTEGER NOT NULL,
                     PRIMARY KEY (channel_id, user_id)
@@ -84,6 +83,7 @@ class Database:
                     channel_id TEXT NOT NULL REFERENCES channels(id)
                         ON DELETE CASCADE,
                     sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL DEFAULT '*',
                     body TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     seq INTEGER NOT NULL,
@@ -94,6 +94,19 @@ class Database:
                     ON messages(channel_id, seq);
                 """
             )
+            # Older Phase 4 databases were created before direct messages had
+            # a recipient column.
+            columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(messages)"
+                ).fetchall()
+            }
+            if "recipient" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE messages ADD COLUMN recipient TEXT "
+                    "NOT NULL DEFAULT '*'"
+                )
 
     @staticmethod
     def _user_record(row):
@@ -109,22 +122,21 @@ class Database:
         }
 
     def create_user(self, username, password_hash, salt, iterations, created_at):
-        user_id = uuid.uuid4().hex
         with self._lock, self._connection:
-            self._connection.execute(
+            cursor = self._connection.execute(
                 """
                 INSERT INTO users
-                    (id, username, password_hash, salt, iterations, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (username, password_hash, salt, iterations, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (user_id, username, password_hash, salt, iterations, created_at),
+                (username, password_hash, salt, iterations, created_at),
             )
             row = self._connection.execute(
                 """
                 SELECT id, username, created_at
                 FROM users WHERE id = ?
                 """,
-                (user_id,),
+                (cursor.lastrowid,),
             ).fetchone()
             return dict(row)
 
@@ -284,12 +296,14 @@ class Database:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def append_message(self, message_id, channel_id, sender, body, created_at):
+    def append_message(self, message_id, channel_id, sender, body, created_at,
+                       recipient="*"):
         """Insert one message, assigning the next per-channel sequence number.
 
         The insert is idempotent: posting the same ``message_id`` twice returns
         the stored row instead of creating a duplicate.
         """
+        recipient = recipient or "*"
         with self._lock, self._connection:
             existing = self._connection.execute(
                 "SELECT * FROM messages WHERE id = ?", (message_id,)
@@ -300,29 +314,35 @@ class Database:
             self._connection.execute(
                 """
                 INSERT INTO messages
-                    (id, channel_id, sender, body, created_at, seq)
-                SELECT ?, ?, ?, ?, ?,
+                    (id, channel_id, sender, recipient, body, created_at, seq)
+                SELECT ?, ?, ?, ?, ?, ?,
                        (SELECT COALESCE(MAX(seq), 0) + 1
                         FROM messages WHERE channel_id = ?)
                 """,
-                (message_id, channel_id, sender, body, created_at, channel_id),
+                (message_id, channel_id, sender, recipient, body, created_at,
+                 channel_id),
             )
             row = self._connection.execute(
                 "SELECT * FROM messages WHERE id = ?", (message_id,)
             ).fetchone()
         return dict(row)
 
-    def list_messages(self, channel_id, since=0, limit=100):
-        with self._lock:
-            cursor = self._connection.execute(
-                """
-                SELECT * FROM messages
-                WHERE channel_id = ? AND seq > ?
-                ORDER BY seq
-                LIMIT ?
-                """,
-                (channel_id, int(since), int(limit)),
+    def list_messages(self, channel_id, since=0, limit=100, viewer=None):
+        query = (
+            "SELECT * FROM messages "
+            "WHERE channel_id = ? AND seq > ?"
+        )
+        params = [channel_id, int(since)]
+        if viewer is not None:
+            query += (
+                " AND (recipient = '*' OR recipient = ? COLLATE NOCASE"
+                " OR sender = ? COLLATE NOCASE)"
             )
+            params.extend([viewer, viewer])
+        query += " ORDER BY seq LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            cursor = self._connection.execute(query, params)
             return self._rows(cursor)
 
     def upsert_peer(self, username, ip, port, last_seen):

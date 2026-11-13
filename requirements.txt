@@ -1,3 +1,2 @@
-# Optional: interface detection for the raw-socket transport only.
-# The standard TCP, asyncio, HTTP, and proxy paths use only the Python stdlib.
+# Required by the raw-socket transport.
 netifaces>=0.11

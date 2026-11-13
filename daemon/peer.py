@@ -226,7 +226,7 @@ class PeerNode:
         if sender != self.username:
             raise PermissionError("this node can only send as its own user")
         message, created = self.chat.post_message(
-            channel_id, sender, body, message_id=message_id
+            channel_id, sender, body, message_id=message_id, recipient="*"
         )
         if created:
             envelope = self._envelope(message)
@@ -239,7 +239,8 @@ class PeerNode:
         if sender != self.username:
             raise PermissionError("this node can only send as its own user")
         message, created = self.chat.post_message(
-            channel_id, sender, body, message_id=message_id
+            channel_id, sender, body, message_id=message_id,
+            recipient=recipient,
         )
         if not created:
             return message
@@ -252,7 +253,9 @@ class PeerNode:
         return message
 
     @staticmethod
-    def _envelope(message, recipient="*"):
+    def _envelope(message, recipient=None):
+        if recipient is None:
+            recipient = message.get("recipient") or "*"
         return {
             "v": protocol.VERSION,
             "id": message["id"],
@@ -381,32 +384,48 @@ class PeerNode:
         if envelope["from"].lower() != username.lower():
             self.stats["rejected"] += 1
             return
+        recipient = envelope.get("to") or "*"
+        if (
+            recipient != "*"
+            and recipient.lower() != self.username.lower()
+        ):
+            # The tracker relays a direct message; other peers drop it.
+            if self.role == "tracker":
+                self._relay_to_others(envelope, address)
+            return
+        if self.role == "tracker":
+            # The tracker is a relay and may not have a local copy of the
+            # channel, so forward the broadcast before looking it up.
+            self._relay_to_others(envelope, address)
         channel = self.chat.database.get_channel(envelope["channel"])
         if channel is None:
-            # The sender's channel id is authoritative; mirror it locally so
-            # the message has a home. Local users can join it afterwards.
+            # A peer may not have seen the channel before the first message.
+            # Mirror its id locally so the recipient can join and read it.
             try:
                 self.chat.database.create_channel(
                     envelope["channel"],
-                    f"channel-{envelope['channel'][:8]}",
+                    "channel-" + envelope["channel"][:8],
                     None,
                     int(envelope["ts"]),
                 )
             except sqlite3.IntegrityError:
                 pass
+            channel = self.chat.database.get_channel(envelope["channel"])
+        if channel is None:
+            self.stats["rejected"] += 1
+            return
         _message, created = self.chat.post_message(
             envelope["channel"],
             envelope["from"],
             envelope["body"],
             message_id=envelope["id"],
             ts=envelope["ts"],
+            recipient=recipient,
         )
         if created:
             self.stats["messages_received"] += 1
         else:
             self.stats["duplicates"] += 1
-        if self.role == "tracker":
-            self._relay_to_others(envelope, address)
 
     def _relay_to_others(self, envelope, address):
         payload = self._encode_payload(envelope)

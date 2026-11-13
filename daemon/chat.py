@@ -84,9 +84,12 @@ class ChatService:
             raise BadRequest("message body contains control characters")
         return body
 
-    def post_message(self, channel_id, sender, body, *, message_id=None, ts=None):
+    def post_message(self, channel_id, sender, body, *, message_id=None,
+                     ts=None, recipient="*"):
         """Return ``(message, created)``; ``created`` is False on duplicate id."""
         self.validate_body(body)
+        if not isinstance(recipient, str) or not recipient:
+            raise BadRequest("message recipient must be a non-empty string")
         if message_id is None:
             message_id = protocol.new_message_id()
         elif not MESSAGE_ID_RE.fullmatch(str(message_id)):
@@ -102,14 +105,17 @@ class ChatService:
             sender,
             body,
             int(ts if ts is not None else self._clock()),
+            recipient,
         )
         return message, True
 
-    def messages(self, channel_id, since=0, limit=100):
+    def messages(self, channel_id, since=0, limit=100, viewer=None):
         if since < 0:
             raise BadRequest("since must not be negative")
         limit = max(1, min(int(limit), 500))
-        return self.database.list_messages(channel_id, since, limit)
+        return self.database.list_messages(
+            channel_id, since, limit, viewer=viewer
+        )
 
     def register_peer(self, username, ip, port):
         if not isinstance(username, str) or not username.strip():
