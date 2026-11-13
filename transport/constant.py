@@ -3,6 +3,7 @@ Shared transport constants.
 """
 
 MAX_SEGMENT_SIZE = 1200
+SND_EAGER_CLEAN = 16
 MAX_RECEIVE_BUFFER = 0xFFFF
 MASK_LSEQ = 0xFFFF
 HALF_LSEQ = (MASK_LSEQ + 1) // 2

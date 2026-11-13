@@ -8,6 +8,8 @@ import threading
 from .ack_track import lseq_distance, lseq_next, lseq_range, newer
 from .constant import (
     MAX_SEGMENT_SIZE,
+    SND_EAGER_CLEAN,
+    MASK_PSEQ,
     MAX_RECEIVE_BUFFER,
     MASK_LSEQ,
     RECV_STORED,
@@ -24,11 +26,14 @@ class SendBuffer:
         Store outgoing data until Session accepts each chunk.
 
         Args:
-            send_data: Bytes to send.
+            send_data   initial outgoing bytes
         """
         self._lseq = 0
-        self._sbuffer = bytearray(send_data)
-        self._acquired = False
+        self._sbuffer = bytearray()
+        self._milestone_entries = []
+        self._committed = 0
+        if send_data:
+            self.register_send_data(send_data)
 
     def _inc_seq_nr(self):
         """
@@ -36,29 +41,81 @@ class SendBuffer:
         """
         self._lseq = lseq_next(self._lseq)
 
+    def _sanitize_milestone(self):
+        """
+        Rebase remaining milestones after committed bytes are released.
+        """
+        if self._committed >= MASK_PSEQ or len(self._milestone_entries) <= SND_EAGER_CLEAN:
+            self._milestone_entries = [length - self._committed for length in self._milestone_entries]
+            self._committed = 0
+
+    def register_send_partial_data(self, send_data):
+        """
+        Append outgoing data without ending the current message.
+
+        Args:
+            send_data   bytes to append
+        """
+        self._sbuffer.extend(send_data)
+
+    def register_send_data(self, send_data):
+        """
+        Append outgoing data and mark the end of a message.
+
+        Args:
+            send_data   bytes to append
+        """
+        self.register_send_partial_data(send_data)
+        self._milestone_entries.append(self._committed + len(self._sbuffer))
+
     def acquire_send_data(self):
         """
         Read the next chunk without removing it from the buffer.
 
         Returns:
-            (logical_seq, chunk), or None when no data remains.
+            (logical_seq, chunk), or None when no data remains
         """
-        if not self._sbuffer:
+        if not self._sbuffer and not self._milestone_entries:
             return None
 
-        self._acquired = True
-        return self._lseq, bytes(self._sbuffer[:MAX_SEGMENT_SIZE])
+        remaining = (self._milestone_entries[0] - self._committed
+                     if self._milestone_entries else len(self._sbuffer))
+        return self._lseq, bytes(self._sbuffer[:min(MAX_SEGMENT_SIZE, remaining)])
 
-    def commit_send_data(self):
+    def is_last_chunk(self) -> bool:
         """
-        Release the acquired chunk after Session takes ownership.
-        """
-        if not self._acquired:
-            raise ValueError("No acquired chunk to commit")
+        Check whether the next chunk completes a message.
 
-        del self._sbuffer[:MAX_SEGMENT_SIZE]
+        Returns:
+            True if the chunk has EOM
+        """
+        return bool(self._milestone_entries) and self._milestone_entries[0] - self._committed <= MAX_SEGMENT_SIZE
+
+    def commit_send_data(self, size: int):
+        """
+        Release a chunk after Session accepts it.
+
+        Args:
+            size   accepted payload bytes
+        """
+        if not 0 <= size <= min(len(self._sbuffer), MAX_SEGMENT_SIZE):
+            raise ValueError("Invalid committed chunk size")
+        if self._milestone_entries:
+            remaining = self._milestone_entries[0] - self._committed
+            if size > remaining or (size == 0 and remaining != 0):
+                raise ValueError("Committed chunk crosses a message boundary")
+        elif size == 0:
+            raise ValueError("No data to commit")
+
+        del self._sbuffer[:size]
+        self._committed += size
+        # If the EOM data has committed, we remove its milestone entry
+        if self._milestone_entries and self._committed == self._milestone_entries[0]:
+            self._milestone_entries.pop(0)
         self._inc_seq_nr()
-        self._acquired = False
+
+        # Sanitize the milestone entries
+        self._sanitize_milestone()
 
 
 class ReceiveBuffer:
