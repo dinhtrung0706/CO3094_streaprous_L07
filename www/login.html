@@ -1,8 +1,26 @@
-<html><body>
-<h1>Login</h1>
-<form method="POST" action="/login">
-  Username: <input name="username" type="text"><br>
-  Password: <input name="password" type="password"><br>
-  <input type="submit" value="Login">
-</form>
-</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login · StreapRous</title>
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <script src="/static/js/chat.js" defer></script>
+</head>
+<body data-auth-page="login">
+  <main class="auth-card">
+    <div class="brand">SR <span>StreapRous</span></div>
+    <h1>Login</h1>
+    <p>Sign in to connect to your peer and channels.</p>
+    <form id="authForm" action="/login" method="POST">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" placeholder="alice">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required minlength="8">
+      <button id="submitButton" type="submit">Login</button>
+      <p id="feedback" role="status" aria-live="polite"></p>
+    </form>
+    <p class="footer">No account? <a href="/register.html">Register here</a></p>
+  </main>
+</body>
+</html>

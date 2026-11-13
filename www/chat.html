@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StreapRous · Hybrid Chat</title>
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <script src="/static/js/chat.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">SR</span>
+        <div><h1>StreapRous Chat</h1><p>Client–server discovery · UDP peer messaging</p></div>
+      </div>
+      <div class="header-actions">
+        <span id="currentUser" class="current-user">Checking session…</span>
+        <button id="logoutButton" type="button" class="button button-secondary">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="page">
+    <div class="page-intro">
+      <div><h2>Chat workspace</h2><p>Manage channels, discover peers and exchange messages using the Phase 4 API.</p></div>
+      <span class="mode-note">CO3094 · Phase 5</span>
+    </div>
+
+    <section class="panel node-panel" aria-labelledby="nodeTitle">
+      <div class="node-description">
+        <span class="section-kicker">NETWORK · SERVER STATUS</span>
+        <h2 id="nodeTitle">Peer daemon</h2>
+        <p>Registration and heartbeat are handled by the Python UDP daemon. The browser only reads status.</p>
+      </div>
+      <div class="node-facts">
+        <div><small>Application mode</small><strong id="nodeMode">Loading…</strong></div>
+        <div><small>UDP node</small><strong id="nodeAddress">—</strong></div>
+        <div><small>Tracker</small><strong id="trackerAddress">—</strong></div>
+        <div><small>Active peers</small><strong id="peerCount">—</strong></div>
+      </div>
+      <button id="refreshStatusButton" type="button" class="button button-outline">Refresh status</button>
+    </section>
+
+    <div class="workspace">
+      <aside class="panel sidebar" aria-label="Peer and channel lists">
+        <section class="side-section" aria-labelledby="peersTitle">
+          <div class="section-heading">
+            <div><span class="section-kicker">DISCOVERY</span><h2 id="peersTitle">Active peers</h2></div>
+            <button id="refreshPeersButton" type="button" class="button button-text">Refresh</button>
+          </div>
+          <ul id="peerList" class="item-list" aria-label="Available peers"><li>Loading peers…</li></ul>
+          <p class="connection-status">Click a peer to open a separate private conversation; no channel is needed.</p>
+          <div class="section-heading"><h2>Direct conversations</h2></div>
+          <ul id="directList" class="item-list" aria-label="Private message history"><li>No private chats yet.</li></ul>
+          <form id="openDirectForm" class="channel-form">
+            <label for="directUsername">Open private chat by username</label>
+            <div class="channel-form-row">
+              <input id="directUsername" name="username" type="text" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" placeholder="e.g. bob" required>
+              <button type="submit" class="button button-outline">Open</button>
+            </div>
+          </form>
+        </section>
+        <section class="side-section" aria-labelledby="channelsTitle">
+          <div class="section-heading">
+            <div><span class="section-kicker">CHANNELS</span><h2 id="channelsTitle">Channels</h2></div>
+            <button id="refreshChannelsButton" type="button" class="button button-text">Refresh</button>
+          </div>
+          <ul id="channelList" class="item-list" aria-label="Channels"><li>Loading channels…</li></ul>
+          <form id="createChannelForm" class="channel-form">
+            <label for="newChannelName">Create channel</label>
+            <div class="channel-form-row">
+              <input id="newChannelName" name="name" type="text" minlength="1" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9 ._-]{0,31}" placeholder="e.g. project-team" required>
+              <button type="submit" class="button button-outline">Create</button>
+            </div>
+          </form>
+          <div class="button-row button-row-equal">
+            <button type="button" id="joinChannelButton" class="button button-secondary" disabled>Join</button>
+            <button type="button" id="leaveChannelButton" class="button button-secondary" disabled>Leave</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="panel chat-panel" aria-labelledby="conversationTitle">
+        <div class="chat-header">
+          <div><span class="section-kicker">MESSAGES</span><h2 id="conversationTitle">Select a channel</h2>
+            <p id="conversationType">Select a channel or an active peer to start chatting.</p></div>
+          <span class="chat-mode-chip">Immutable history</span>
+        </div>
+        <div id="messageList" class="messages" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions"></div>
+        <form id="messageForm" class="message-form">
+          <label for="messageInput">Message</label>
+          <textarea id="messageInput" rows="3" maxlength="2000" placeholder="Select a joined channel to type a message…" required disabled></textarea>
+          <div class="message-actions">
+            <p id="deliveryNote" class="helper-copy">Channel messages are public to channel members. Direct messages are stored separately and visible only to the two participants via HTTP API.</p>
+            <button type="submit" id="sendButton" class="button button-primary" disabled>Send message</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <section class="panel notification-panel" aria-labelledby="notificationTitle">
+      <div class="section-heading notifications-heading">
+        <div><span class="section-kicker">ACTIVITY</span><h2 id="notificationTitle">Notifications &amp; network status</h2></div>
+        <span id="networkStatus" class="network-pill status-loading">Connecting…</span>
+      </div>
+      <p id="appBanner" class="app-banner" role="alert" hidden></p>
+      <ul id="notifications" class="notification-list" aria-live="polite" aria-relevant="additions"></ul>
+      <p class="footnote">Browser → HTTP API → Python PeerNode → UDP peers. HTTP 201 confirms API acceptance, not remote UDP delivery. Private UDP messages are stored in a separate table. File transfer awaits backend endpoints.</p>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Register · StreapRous</title>
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <script src="/static/js/chat.js" defer></script>
+</head>
+<body data-auth-page="register">
+  <main class="auth-card">
+    <div class="brand">SR <span>StreapRous</span></div>
+    <h1>Create account</h1>
+    <p>Your account will be stored in the local peer's SQLite database.</p>
+    <form id="authForm" action="/register" method="POST">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" placeholder="alice">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required minlength="8">
+      <label for="confirmPassword">Confirm password</label>
+      <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" required minlength="8">
+      <button id="submitButton" type="submit">Create account</button>
+      <p id="feedback" role="status" aria-live="polite"></p>
+    </form>
+    <p class="footer">Already registered? <a href="/login.html">Login</a></p>
+  </main>
+</body>
+</html>
