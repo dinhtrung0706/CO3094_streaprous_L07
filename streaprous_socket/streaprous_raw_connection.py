@@ -26,9 +26,11 @@ import sys
 import threading
 import time
 from collections import namedtuple
-from typing import Optional
 
-import netifaces
+try:  # Optional: only the raw transport uses interface detection.
+    import netifaces
+except ImportError:  # pragma: no cover - depends on host packages
+    netifaces = None
 
 # Import streaprout packet dispatcher functions
 from .streaprous_packet_dispatcher import (
@@ -329,7 +331,7 @@ def create_raw_socket() -> socket.socket:
         sys.exit(1)
 
 
-def get_interface_ip(interface_name: Optional[str] = None) -> str:
+def get_interface_ip(interface_name: str | None = None) -> str:
     """
     Get the IPv4 address of a network interface.
     
@@ -341,11 +343,11 @@ def get_interface_ip(interface_name: Optional[str] = None) -> str:
         IPv4 address string
     """
     try:
-        if interface_name:
+        if interface_name and netifaces is not None:
             addrs = netifaces.ifaddresses(interface_name)
             if netifaces.AF_INET in addrs:
                 return addrs[netifaces.AF_INET][0]['addr']
-        else:
+        elif netifaces is not None:
             # Try to get default route interface
             gateways = netifaces.gateways()
             default_gateway = gateways.get('default', {}).get(netifaces.AF_INET)
@@ -368,8 +370,7 @@ def get_interface_ip(interface_name: Optional[str] = None) -> str:
         return "127.0.0.1"
 
 
-
-def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: Optional[str] = None) -> conn_struct:
+def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: str | None = None) -> conn_struct:
     """
     Accept a new connection by performing the 3-way handshake using raw sockets.
     Returns a conn_struct tuple for the established connection.
