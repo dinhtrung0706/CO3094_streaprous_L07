@@ -45,31 +45,6 @@ from daemon.streaprous import StreapRous
 app.prepare_address(ip, port)
 app.run()
 ```
-
-## Phase 3: account authentication
-
-The sample app provides `POST /register`, `POST /login`, `POST /logout`, and
-`GET /api/me`. Registration and login accept either JSON
-(`{"username":"alice","password":"..."}`) or
-`application/x-www-form-urlencoded` form data. Registration creates an account;
-login creates a server-side session and returns a CSRF token in the JSON body.
-Send the `SR_SESSION` cookie on later requests and send the returned token as
-`X-CSRF-Token` when calling `POST /logout`.
-
-Passwords are stored as PBKDF2-HMAC-SHA256 hashes with per-user random salts.
-Session tokens are random, signed, and stored in SQLite only as SHA-256 hashes.
-The default database is `data/streaprous.sqlite3`; set `STREAPROUS_DB_PATH` to
-choose another path. Set `STREAPROUS_SESSION_SECRET` to a secret of at least
-32 UTF-8 bytes to keep sessions valid across server restarts. If it is unset,
-the server generates an in-memory key and invalidates sessions on restart.
-Set `STREAPROUS_COOKIE_SECURE=1` when serving over HTTPS.
-
-The framework's `auth=True` route option now accepts either a valid session
-cookie or HTTP Basic credentials. Basic credentials are not encrypted by this
-server; use them only over a trusted network or behind HTTPS. This phase does
-not add password reset, roles, account lockout, or a full registration/login
-web interface.
-
 ## License
 
 See [LICENSE](LICENSE) — educational use only for CO3093/CO3094.
