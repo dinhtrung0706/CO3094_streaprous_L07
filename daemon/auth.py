@@ -8,7 +8,9 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
+from urllib.parse import quote
 
 from .database import Database
 from .errors import BadRequest, UnsupportedMediaType
@@ -26,6 +28,11 @@ MAX_PASSWORD_BYTES = 1024
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
 _SESSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SIGNATURE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+DIGEST_REALM = "StreapRous"
+DIGEST_NONCE_TTL = 300
+_DIGEST_RE = re.compile(
+    r'([A-Za-z]+)=(?:"((?:\\.|[^"\\])*)"|([^,\s]+))'
+)
 
 
 def _b64url(data):
@@ -43,6 +50,7 @@ class AuthService:
         session_ttl=SESSION_TTL_SECONDS,
         cookie_secure=False,
         password_iterations=PASSWORD_ITERATIONS,
+        peer_secret=None,
     ):
         self.database = (
             database if isinstance(database, Database) else Database(database)
@@ -70,6 +78,20 @@ class AuthService:
         if not isinstance(signing_key, bytes) or len(signing_key) < 32:
             raise ValueError("session signing key must be at least 32 bytes")
         self._signing_key = signing_key
+        configured_peer_secret = peer_secret or os.environ.get(
+            "STREAPROUS_PEER_SECRET"
+        )
+        if configured_peer_secret is None:
+            self._peer_secret = self._signing_key
+        elif isinstance(configured_peer_secret, str):
+            self._peer_secret = configured_peer_secret.encode("utf-8")
+        else:
+            self._peer_secret = bytes(configured_peer_secret)
+        if len(self._peer_secret) < 32:
+            raise ValueError("peer secret must be at least 32 bytes")
+        self._digest_nonces = {}
+        self._digest_lock = threading.Lock()
+        self._digest_counts = {}
         self._dummy_salt = secrets.token_bytes(PASSWORD_SALT_BYTES)
         self._dummy_hash = hashlib.pbkdf2_hmac(
             "sha256",
@@ -115,6 +137,7 @@ class AuthService:
     def register(self, username, password):
         username = self._validate_username(username)
         password_bytes = self._validate_password(password)
+        self.database._ensure_digest_column()
         salt = secrets.token_bytes(PASSWORD_SALT_BYTES)
         password_hash = hashlib.pbkdf2_hmac(
             "sha256",
@@ -129,6 +152,9 @@ class AuthService:
             salt,
             self.password_iterations,
             int(time.time()),
+            hashlib.md5(
+                f"{username}:{DIGEST_REALM}:".encode() + password_bytes
+            ).hexdigest(),
         )
 
     def authenticate(self, username, password):
@@ -141,6 +167,9 @@ class AuthService:
             return None
 
         user = self.database.get_user(username)
+        if user is not None and "digest_ha1" not in user:
+            self.database._ensure_digest_column()
+            user = self.database.get_user(username)
         salt = user["salt"] if user else self._dummy_salt
         iterations = user["iterations"] if user else self.password_iterations
         expected = user["password_hash"] if user else self._dummy_hash
@@ -153,6 +182,12 @@ class AuthService:
         )
         if user is None or not hmac.compare_digest(actual, expected):
             return None
+        if not user.get("digest_ha1"):
+            digest_ha1 = hashlib.md5(
+                f"{user['username']}:{DIGEST_REALM}:".encode()
+                + password_bytes
+            ).hexdigest()
+            self.database.set_digest_ha1(user["id"], digest_ha1)
         return self._public_user(user)
 
     def _token_hash(self, token):
@@ -170,10 +205,9 @@ class AuthService:
         if ttl <= 0:
             raise ValueError("ttl must be positive")
         expires_at = int(time.time()) + ttl
-        payload = f"{username}|{expires_at}".encode("utf-8")
-        signature = hmac.new(
-            self._signing_key, b"peer:" + payload, hashlib.sha256
-        ).digest()
+        payload = f"{username}|{expires_at}".encode()
+        signature = hmac.new(self._peer_secret, b"peer:" + payload,
+                             hashlib.sha256).digest()
         return _b64url(payload) + "." + _b64url(signature)
 
     def verify_peer_token(self, token):
@@ -191,7 +225,7 @@ class AuthService:
         except (ValueError, TypeError):
             return None
         expected = hmac.new(
-            self._signing_key, b"peer:" + payload, hashlib.sha256
+            self._peer_secret, b"peer:" + payload, hashlib.sha256
         ).digest()
         if not hmac.compare_digest(signature, expected):
             return None
@@ -203,6 +237,122 @@ class AuthService:
         if not username or expires_at < int(time.time()):
             return None
         return username
+
+    def issue_digest_challenge(self):
+        """Create an expiring nonce for an HTTP Digest challenge."""
+        nonce = _b64url(secrets.token_bytes(24))
+        now = int(time.time())
+        signature = _b64url(hmac.new(
+            self._signing_key, f"digest:{nonce}:{now}".encode("ascii"),
+            hashlib.sha256,
+        ).digest())
+        value = f"{nonce}.{now}.{signature}"
+        with self._digest_lock:
+            self._digest_nonces[value] = {"expires": now + DIGEST_NONCE_TTL,
+                                          "counts": {}}
+            self._expire_digest_nonces(now)
+        return value
+
+    def _expire_digest_nonces(self, now):
+        for nonce, state in list(self._digest_nonces.items()):
+            if state["expires"] < now:
+                self._digest_nonces.pop(nonce, None)
+
+    def digest_challenge(self):
+        nonce = self.issue_digest_challenge()
+        return (
+            f'Digest realm="{DIGEST_REALM}", nonce="{nonce}", '
+            'algorithm=MD5, qop="auth"'
+        )
+
+    @staticmethod
+    def parse_digest_header(value):
+        """Return validated Digest Authorization parameters."""
+        if not isinstance(value, str) or not value.lower().startswith("digest "):
+            return None
+        params = {}
+        for match in _DIGEST_RE.finditer(value[7:]):
+            key = match.group(1).lower()
+            val = match.group(2) if match.group(2) is not None else match.group(3)
+            params[key] = val.replace('\\"', '"').replace('\\\\', '\\')
+        required = {"username", "realm", "nonce", "uri", "response", "qop",
+                    "nc", "cnonce"}
+        return params if required.issubset(params) else None
+
+    def verify_digest_request(self, request):
+        """Authenticate a Digest qop=auth request, rejecting nonce replay."""
+        params = self.parse_digest_header(request.headers.get("Authorization"))
+        if not params or params["realm"] != DIGEST_REALM or params["qop"] != "auth":
+            return None
+        if params["uri"] != request.target or not re.fullmatch(
+            r"[0-9A-Fa-f]{8}", params["nc"]
+        ):
+            return None
+        nonce = params["nonce"]
+        now = int(time.time())
+        try:
+            encoded_nonce, timestamp, signature = nonce.split(".", 2)
+            timestamp = int(timestamp)
+        except (ValueError, TypeError):
+            return None
+        expected_nonce_signature = _b64url(hmac.new(
+            self._signing_key,
+            f"digest:{encoded_nonce}:{timestamp}".encode("ascii"),
+            hashlib.sha256,
+        ).digest())
+        if timestamp + DIGEST_NONCE_TTL < now or timestamp > now:
+            return None
+        if not hmac.compare_digest(signature, expected_nonce_signature):
+            return None
+        user = self.database.get_user(params["username"])
+        digest_ha1 = self.database.get_digest_ha1(params["username"])
+        if user is None or not digest_ha1:
+            return None
+        ha2 = hashlib.md5(
+            f"{request.method}:{params['uri']}".encode()
+        ).hexdigest()
+        expected = hashlib.md5(
+            f"{digest_ha1}:{nonce}:{params['nc']}:{params['cnonce']}"
+            f":auth:{ha2}".encode()
+        ).hexdigest()
+        if not hmac.compare_digest(expected, params["response"].lower()):
+            return None
+        with self._digest_lock:
+            self._expire_digest_nonces(now)
+            state = self._digest_nonces.get(nonce)
+            if state is None:
+                return None
+            replay_key = (params["username"].casefold(), params["cnonce"])
+            previous = state["counts"].get(replay_key, 0)
+            count = int(params["nc"], 16)
+            if count <= previous:
+                return None
+            state["counts"][replay_key] = count
+        return self._public_user(user)
+
+    def verify_peer_request(self, username, timestamp, signature, body):
+        """Verify a short-lived peer signature over identity and HTTP body."""
+        try:
+            timestamp = int(timestamp)
+        except (TypeError, ValueError):
+            return False
+        if abs(int(time.time()) - timestamp) > 60:
+            return False
+        message = username.encode("utf-8") + b"\n" + str(timestamp).encode() \
+            + b"\n" + bytes(body)
+        expected = _b64url(hmac.new(
+            self._peer_secret, message, hashlib.sha256
+        ).digest())
+        return isinstance(signature, str) and hmac.compare_digest(
+            expected, signature
+        )
+
+    def sign_peer_request(self, username, timestamp, body):
+        message = username.encode("utf-8") + b"\n" + str(timestamp).encode() \
+            + b"\n" + bytes(body)
+        return _b64url(hmac.new(
+            self._peer_secret, message, hashlib.sha256
+        ).digest())
 
 
     def _csrf_for_token(self, token):
@@ -254,8 +404,11 @@ class AuthService:
             return session["user"]
 
         credentials = getattr(request, "auth", None)
-        if credentials:
+        if isinstance(credentials, (tuple, list)) and len(credentials) == 2:
             return self.authenticate(*credentials)
+        digest_user = self.verify_digest_request(request)
+        if digest_user is not None:
+            return digest_user
         return None
 
     def _credentials_from_request(self, request):
@@ -296,8 +449,19 @@ class AuthService:
             request.user = self.authenticate_request(request)
             return None
 
+        @app.route("/register", methods=["GET"])
         @app.route("/register", methods=["POST"])
-        def register(request):
+        def register_route(request):
+            if request.method == "GET":
+                return Response().html(
+                    '<!doctype html><html lang="en"><meta charset="utf-8">'
+                    '<title>Register</title><h1>Register</h1>'
+                    '<form method="post" action="/register">'
+                    '<label>Username <input name="username" required></label>'
+                    '<label>Password <input name="password" type="password" '
+                    'minlength="8" required></label>'
+                    '<button type="submit">Register</button></form>'
+                )
             username, password = self._credentials_from_request(request)
             try:
                 user = self.register(username, password)
@@ -311,8 +475,18 @@ class AuthService:
                 status=201,
             )
 
+        @app.route("/login", methods=["GET"])
         @app.route("/login", methods=["POST"])
-        def login(request):
+        def login_route(request):
+            if request.method == "GET":
+                return Response().html(
+                    '<!doctype html><html lang="en"><meta charset="utf-8">'
+                    '<title>Login</title><h1>Login</h1>'
+                    '<form method="post" action="/login">'
+                    '<label>Username <input name="username" required></label>'
+                    '<label>Password <input name="password" type="password" '
+                    'required></label><button type="submit">Login</button></form>'
+                )
             username, password = self._credentials_from_request(request)
             user = self.authenticate(username, password)
             if user is None:
@@ -367,6 +541,7 @@ class AuthService:
             return Response().json(result)
 
         app._streaprous_auth_service = self
+        app.routes.auth_service = self
         return self
 
 
@@ -377,6 +552,7 @@ def install_auth(
     signing_key=None,
     cookie_secure=None,
     password_iterations=None,
+    peer_secret=None,
 ):
     """Install account endpoints on an app using environment-based settings."""
     existing = getattr(app, "_streaprous_auth_service", None)
@@ -393,6 +569,7 @@ def install_auth(
     options = {
         "signing_key": signing_key,
         "cookie_secure": cookie_secure,
+        "peer_secret": peer_secret,
     }
     if password_iterations is not None:
         options["password_iterations"] = int(password_iterations)

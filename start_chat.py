@@ -28,6 +28,7 @@ def build_parser():
     parser.add_argument("--mode", choices=("peer", "tracker", "local"), default="peer")
     parser.add_argument("--server-ip", default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=8000)
+    parser.add_argument("--public-http-port", type=int, default=None)
     parser.add_argument("--udp-port", type=int, default=9100)
     parser.add_argument(
         "--tracker",
@@ -58,6 +59,15 @@ def main(argv=None):
     if args.mode == "peer" and args.tracker is None:
         print("error: --tracker is required in peer mode", file=sys.stderr)
         return 2
+    if args.mode != "local":
+        peer_secret = os.environ.get("STREAPROUS_PEER_SECRET", "")
+        if len(peer_secret.encode("utf-8")) < 32:
+            print(
+                "error: set STREAPROUS_PEER_SECRET to a shared value of "
+                "at least 32 bytes",
+                file=sys.stderr,
+            )
+            return 2
 
     os.makedirs(os.path.dirname(os.path.abspath(args.db)), exist_ok=True)
     create_chatapp(
@@ -71,6 +81,7 @@ def main(argv=None):
         username=args.username,
         transport=args.transport,
         heartbeat=args.heartbeat,
+        http_port=args.public_http_port or args.server_port,
     )
     return 0
 
