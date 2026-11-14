@@ -89,6 +89,16 @@ class CControl:
             else:
                 self._cwnd += MAX_SEGMENT_SIZE * ack_bytes / self._cwnd
 
+    def account_drop(self, drop_bytes):
+        """
+        Release congestion capacity without increasing the window.
+
+        Args:
+            drop_bytes   bytes discarded after retry exhaustion
+        """
+        with self._wnd_lock:
+            self._in_flight -= drop_bytes
+
     def switch_fast_recovery(self, session, lseq_list):
         """
         Reduce the congestion window when loss is detected.

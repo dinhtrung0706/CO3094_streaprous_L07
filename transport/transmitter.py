@@ -140,6 +140,10 @@ class Transmitter:
             for packet_key in retransmit_packets:
                 session.retransmit_packet(packet_key)
 
+        dropped = self.flush_drop_list()
+        if dropped:
+            session.handle_dropped_packets(dropped)
+
     def _deadline_loop(self, session):
         # We approximate the waiting time instead of execute every time
         wait_time = 1.0
@@ -156,7 +160,7 @@ class Transmitter:
                 return
 
             self._stop.clear()
-            self._thread = threading.Thread(target=self._deadline_loop, args=(session,))
+            self._thread = threading.Thread(target=self._deadline_loop, args=(session,), daemon=True)
             self._thread.start()
 
     def stop_thread_deadline(self):
