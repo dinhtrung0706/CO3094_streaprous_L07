@@ -32,6 +32,7 @@ import os
 import re
 import time
 from http import HTTPStatus
+from typing import Optional
 from urllib.parse import unquote
 
 from . import config
@@ -236,7 +237,7 @@ class Response:
         #: Response protocol version.
         self.http_version = "HTTP/1.1"
         #: None derives from the request; True/False overrides it.
-        self.keep_alive = None
+        self.keep_alive: Optional[bool] = None
         #: URL/target associated with the response.
         self.url = None
         self.history = []

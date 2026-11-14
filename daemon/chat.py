@@ -21,7 +21,7 @@ class ChatService:
         self.peer_ttl = int(peer_ttl)
         self._clock = clock
 
-    def create_channel(self, name, owner, *, is_private=False):
+    def create_channel(self, name, owner):
         if not isinstance(name, str):
             raise BadRequest("channel name must be a string")
         name = name.strip()
@@ -39,7 +39,6 @@ class ChatService:
             name,
             owner["id"],
             int(self._clock()),
-            int(bool(is_private)),
         )
         self.database.add_channel_member(channel_id, owner["id"], int(self._clock()))
         channel["member_count"] = 1

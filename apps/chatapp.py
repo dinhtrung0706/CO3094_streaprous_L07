@@ -106,11 +106,7 @@ def build_chatapp(
 
     @app.route("/api/status", methods=["GET"])
     def status(request):
-        return {
-            "mode": mode,
-            "node": peer.status() if peer is not None else None,
-            "channels": len(chat.list_channels(user_id=0)),
-        }
+        return {"mode": mode}
 
     @app.route("/api/channels", methods=["GET"], auth=True)
     @_api
@@ -125,7 +121,6 @@ def build_chatapp(
             channel = chat.create_channel(
                 data.get("name", ""),
                 request.user,
-                is_private=bool(data.get("private", False)),
             )
         except BadRequest:
             raise

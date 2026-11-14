@@ -65,7 +65,6 @@ class Database:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
                     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-                    is_private INTEGER NOT NULL DEFAULT 0,
                     created_at INTEGER NOT NULL
                 );
 
@@ -209,15 +208,15 @@ class Database:
     def _rows(cursor):
         return [dict(row) for row in cursor.fetchall()]
 
-    def create_channel(self, channel_id, name, owner_id, created_at, is_private=0):
+    def create_channel(self, channel_id, name, owner_id, created_at):
         with self._lock, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO channels
-                    (id, name, owner_id, is_private, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (id, name, owner_id, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (channel_id, name, owner_id, int(bool(is_private)), created_at),
+                (channel_id, name, owner_id, created_at),
             )
             row = self._connection.execute(
                 "SELECT * FROM channels WHERE id = ?", (channel_id,)

@@ -437,15 +437,10 @@ class PeerNode:
         logger.warning("peer %s rejected our token", address)
 
     def status(self):
-        result = dict(self.stats)
-        result.update(
-            {
-                "username": self.username,
-                "role": self.role,
-                "address": self.address,
-                "tracker": self.tracker,
-                "peers": len(self.chat.peers()),
-                "channels": len(self._channels),
-            }
-        )
-        return result
+        return {
+            "username": self.username,
+            "role": self.role,
+            "address": self.address,
+            "tracker": self.tracker,
+            "peers": len(self.chat.peers()),
+        }
