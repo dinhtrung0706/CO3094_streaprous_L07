@@ -184,14 +184,17 @@ class ReceiveBuffer:
         with self._rbuffer_lock:
             start_seq = self._s6t_unacked_seq
             end_seq = start_seq
+            # Search for sthe EOM lseq
             while end_seq in self._chunks:
-                if len(self._chunks[end_seq]) > MAX_SEGMENT_SIZE:
-                    return RECV_ERROR
+                is_last = end_seq in self._last_seq
                 end_seq = lseq_next(end_seq)
+                if is_last:
+                    break
 
             if end_seq == start_seq:
                 return RECV_WAITING
 
+            # Try to flush the chunks [start_seq, end_seq)
             try:
                 output.seek(0, 2)
                 start = output.tell()
@@ -212,9 +215,19 @@ class ReceiveBuffer:
 
             for seq in lseq_range(start_seq, end_seq):
                 self._received_bytes -= len(self._chunks.pop(seq))
-            self._last_seq = [seq for seq in self._last_seq if seq in self._chunks]
             self._s6t_unacked_seq = end_seq
             return start_seq, end_seq
+
+    def flushed_eom(self) -> bool:
+        """
+        Check whether the lastest flushed chunk is eom.
+
+        Returns:
+            True if EOM was flushed
+        """
+        with self._rbuffer_lock:
+            return (bool(self._last_seq)
+                    and lseq_next(self._last_seq[0]) == self._s6t_unacked_seq)
 
     def buffered_size(self) -> int:
         """
