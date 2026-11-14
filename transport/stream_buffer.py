@@ -4,6 +4,7 @@ Buffers for sending and assembling transport data.
 
 import errno
 import threading
+from typing import Optional, Tuple, Union
 
 from .ack_track import lseq_distance, lseq_next, lseq_range, newer
 from .constant import (
@@ -169,7 +170,7 @@ class ReceiveBuffer:
 
             return status
 
-    def flush_to_file(self, output) -> tuple[int, int] | int:
+    def flush_to_file(self, output) -> Union[Tuple[int, int], int]:
         """
         Flush only consecutive buffered chunks to a binary file.
 
@@ -249,7 +250,7 @@ class ReceiveBuffer:
         with self._rbuffer_lock:
             return self._capacity - self._received_bytes
 
-    def form_receive_data(self) -> bytes | None:
+    def form_receive_data(self) -> Optional[bytes]:
         """
         Assemble the next complete message, keeping later chunks buffered.
 

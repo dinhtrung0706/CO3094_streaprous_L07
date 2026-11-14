@@ -3,6 +3,7 @@ Track acknowledged logical sequence ranges.
 """
 
 import threading
+from typing import List, Tuple
 
 from .constant import HALF_LSEQ, MASK_LSEQ, MAX_ACK_RANGES
 
@@ -34,7 +35,7 @@ def lseq_next(seq: int) -> int:
     return (seq + 1) & MASK_LSEQ
 
 
-def lseq_range(start: int, end: int) -> list[int]:
+def lseq_range(start: int, end: int) -> List[int]:
     """
     Get a half-open range with wraparound.
 
@@ -62,7 +63,7 @@ def newer(a: int, b: int) -> bool:
     return 0 < lseq_distance(a, b) < HALF_LSEQ
 
 
-def _lseq_segments(start: int, end: int) -> list[tuple[int, int]]:
+def _lseq_segments(start: int, end: int) -> List[Tuple[int, int]]:
     """
     Split a wrapping range into ordinary half-open ranges.
 
@@ -81,7 +82,7 @@ def _lseq_segments(start: int, end: int) -> list[tuple[int, int]]:
     return segments
 
 
-def _binsearch_placement(key, arr, start, end) -> tuple[int, bool]:
+def _binsearch_placement(key, arr, start, end) -> Tuple[int, bool]:
     """
     Binary search for the placement of key in the array of ranges.
 
@@ -237,7 +238,7 @@ class ACKTracker:
         """
         return self.merge(logical_seq, lseq_next(logical_seq))
 
-    def acknowledge(self, ack_seq: int, ranges: list[tuple[int, int]],
+    def acknowledge(self, ack_seq: int, ranges: List[Tuple[int, int]],
                     pending_sequences) -> None:
         """
         Merge cumulative and selective ACK ranges.
@@ -305,7 +306,7 @@ class ACKTracker:
         with self._ack_windows_lock:
             return self._cumulative_next
 
-    def get_ranges(self) -> list[tuple[int, int]]:
+    def get_ranges(self) -> List[Tuple[int, int]]:
         """
         Get the earliest acknowledged ranges.
 

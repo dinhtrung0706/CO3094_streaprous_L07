@@ -6,6 +6,7 @@ import struct
 import threading
 import time
 from pathlib import Path
+from typing import Optional, Tuple, Union
 
 from .ack_track import ACKTracker, lseq_next, lseq_range
 from .congestion_control import CControl
@@ -106,11 +107,13 @@ class Session:
             print(f"[Session] Warning: Cannot close receive file: {exc}")
         if remove:
             try:
-                Path(output.name).unlink(missing_ok=True)
+                Path(output.name).unlink()
+            except FileNotFoundError:
+                pass
             except OSError as exc:
                 print(f"[Session] Warning: Cannot remove partial file: {exc}")
 
-    def _transfer_id(self, packet: Packet) -> int | None:
+    def _transfer_id(self, packet: Packet) -> Optional[int]:
         """
         Read the transfer identifier from a TRANSFER packet.
 
@@ -125,7 +128,7 @@ class Session:
             return None
         return struct.unpack_from("!I", packet.payload)[0]
 
-    def _packet_key(self, packet: Packet) -> tuple[int, int | None, int]:
+    def _packet_key(self, packet: Packet) -> Tuple[int, Optional[int], int]:
         """
         Identify a logical packet by its lane, transfer, and sequence.
 
@@ -139,8 +142,8 @@ class Session:
         return packet.lane, transfer_id, packet.logical_seq
 
     def _acquire_tracker(self, trackers: dict, lane: int,
-                         transfer_id: int | None = None,
-                         create: bool = False) -> ACKTracker | None:
+                         transfer_id: Optional[int] = None,
+                         create: bool = False) -> Optional[ACKTracker]:
         """
         Get the ACK tracker for a lane or transfer.
 
@@ -217,7 +220,7 @@ class Session:
             return True
 
     def send_next_chunk(self, buffer: SendBuffer,
-                        transfer_id: int | None = None) -> bool | None:
+                        transfer_id: Optional[int] = None) -> Optional[bool]:
         """
         Send one buffered chunk with its transfer identifier.
 
@@ -247,7 +250,7 @@ class Session:
             buffer.commit_send_data(len(data))
         return accepted
 
-    def retransmit_packet(self, packet_key: tuple[int, int | None, int]) -> bool:
+    def retransmit_packet(self, packet_key: Tuple[int, Optional[int], int]) -> bool:
         """
         Retransmit a pending logical packet without reserving capacity again.
 
@@ -444,7 +447,7 @@ class Session:
         """
         return self._recv_buffers.setdefault(transfer_id, ReceiveBuffer())
 
-    def _flush_receive_file(self, transfer_id: int) -> tuple[int, int] | int:
+    def _flush_receive_file(self, transfer_id: int) -> Union[Tuple[int, int], int]:
         """
         Flush consecutive chunks to the partial file.
 
@@ -488,7 +491,7 @@ class Session:
         self._completed_files[transfer_id] = completed_path
         return RECV_STORED
 
-    def register_receive_file(self, transfer_id: int) -> Path | None:
+    def register_receive_file(self, transfer_id: int) -> Optional[Path]:
         """
         Save an incoming transfer to disk instead of delivering bytes.
 
@@ -544,7 +547,7 @@ class Session:
         used = sum(buffer.buffered_size() for buffer in self._recv_buffers.values())
         return max(0, MAX_RECEIVE_BUFFER - used)
 
-    def _make_ack(self, packet: Packet) -> Packet | None:
+    def _make_ack(self, packet: Packet) -> Optional[Packet]:
         """
         Build an ACK from the received logical ranges.
 
@@ -593,7 +596,7 @@ class Session:
             if response is not None:
                 self.send_packet(response)
 
-    def _schedule_ack(self, packet: Packet, status: int) -> Packet | None:
+    def _schedule_ack(self, packet: Packet, status: int) -> Optional[Packet]:
         """
         Delay a DATA ACK unless an immediate reply is needed.
 
@@ -684,7 +687,7 @@ class Session:
 
         return status
 
-    def receive_transfer(self, transfer_id: int) -> bytes | None:
+    def receive_transfer(self, transfer_id: int) -> Optional[bytes]:
         """
         Return completed in-memory transfer data.
 
@@ -700,7 +703,7 @@ class Session:
             buffer = self._recv_buffers.get(transfer_id)
             return buffer.form_receive_data() if buffer is not None else None
 
-    def receive_file(self, transfer_id: int) -> Path | None:
+    def receive_file(self, transfer_id: int) -> Optional[Path]:
         """
         Return the path of a completed file transfer.
 
@@ -751,7 +754,7 @@ class Session:
             self._pending_packets.clear()
             self._send_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
 
-    def receive_packet(self) -> Packet | None:
+    def receive_packet(self) -> Optional[Packet]:
         """
         Decode and handle one packet from the connection.
 

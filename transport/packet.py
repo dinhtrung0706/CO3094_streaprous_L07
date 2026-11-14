@@ -4,6 +4,7 @@ Encode and decode framed CONTROL and TRANSFER packets.
 
 import struct
 from dataclasses import dataclass
+from typing import List, Tuple
 
 from .constant import (
     ACK_RANGE_COUNT_SIZE, MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES, TRANSFER_ID_SIZE,
@@ -158,7 +159,7 @@ def parse_buffer(data: bytes):
     return packet, data[total_size:]
 
 
-def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
+def encode_ack_ranges(ranges: List[Tuple[int, int]]) -> bytes:
     """
     Encode ordered, half-open ACK ranges into bytes.
 
@@ -184,7 +185,7 @@ def encode_ack_ranges(ranges: list[tuple[int, int]]) -> bytes:
     return bytes(data)
 
 
-def decode_ack_ranges(data: bytes) -> list[tuple[int, int]]:
+def decode_ack_ranges(data: bytes) -> List[Tuple[int, int]]:
     """
     Decode and validate ACK ranges from a packet payload.
 
