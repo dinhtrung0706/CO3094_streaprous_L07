@@ -5,6 +5,8 @@ Transmitter handles the transmission and retransmission process
 import threading
 import time
 
+from .constant import MAX_ACK_DELAY
+
 RTT_VAR_RCONST = 0.25
 SRTT_RCONST = 0.125
 RTO_VAR_MCONST = 4
@@ -114,7 +116,7 @@ class Transmitter:
         current_time = current_time if current_time is not None else time.monotonic()
         retransmit_packets = []
         with self._time_lock:
-            rto = self._rto
+            rto = self._rto + MAX_ACK_DELAY
 
         with self._list_lock:
             for packet_key, attempts in list(self._pktmeta.items()):
