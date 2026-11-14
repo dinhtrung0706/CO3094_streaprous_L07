@@ -20,6 +20,7 @@ Provides connection management, send/receive functionality using raw sockets.
 """
 
 import queue
+import secrets
 import socket
 import struct
 import sys
@@ -121,6 +122,10 @@ handshake_in_progress = {}
 DEFAULT_LISTEN_IP = "0.0.0.0"
 DEFAULT_LISTEN_PORT = 22239
 DEFAULT_INTERFACE_NAME = "lo0"
+TCP_SEQUENCE_MASK = 0xFFFFFFFF
+TCP_HEADER_SIZE = struct.calcsize("!HHLLBBHHH")
+IPV4_HEADER_SIZE = 20
+SYN_ACK_FLAGS = 0x12
 
 def register_keep_port_alive(listen_ip="0.0.0.0", listen_port=22239, retry_interval=10):
     """
@@ -667,6 +672,106 @@ def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: s
             handshake_in_progress.clear()
         raise
 
+
+def connect(s: socket.socket, local_ip: str, local_port: int,
+            peer_ip: str, peer_port: int, timeout: float = 2.0,
+            retries: int = 5) -> conn_struct | None:
+    """
+    Establish an outgoing raw connection using the three-way handshake.
+
+    Args:
+        s           raw socket
+        local_ip    local IPv4 address
+        local_port  local port
+        peer_ip     remote IPv4 address
+        peer_port   remote port
+        timeout     seconds per handshake attempt
+        retries     maximum SYN attempts
+
+    Returns:
+        Established connection information, or None on failure
+    """
+    peer_key = (peer_ip, peer_port)
+    with connections_lock:
+        if peer_key in connections:
+            print("[Streap_raw] Warning: Connection already exists")
+            return None
+
+    start_packet_dispatcher(s, local_port)
+    responses = get_packet_queue(peer_key)
+    initial_seq = secrets.randbelow(TCP_SEQUENCE_MASK + 1)
+    client_seq = (initial_seq + 1) & TCP_SEQUENCE_MASK
+    syn = build_tcp_packet(local_ip, peer_ip, local_port, peer_port,
+                           initial_seq, 0, syn=1)
+    syn_packet = build_ip_header(local_ip, peer_ip, socket.IPPROTO_TCP, len(syn)) + syn
+
+    for _ in range(retries):
+        try:
+            s.sendto(syn_packet, (peer_ip, 0))
+        except OSError as exc:
+            print(f"[Streap_raw] Warning: Cannot send SYN: {exc}")
+            break
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                packet, _addr = responses.get(timeout=remaining)
+            except queue.Empty:
+                break
+
+            if len(packet) < IPV4_HEADER_SIZE + TCP_HEADER_SIZE:
+                continue
+            ip_header_len = (packet[0] & 0x0F) * 4
+            if ip_header_len < IPV4_HEADER_SIZE or len(packet) < ip_header_len + TCP_HEADER_SIZE:
+                continue
+            if (socket.inet_ntoa(packet[12:16]) != peer_ip
+                    or socket.inet_ntoa(packet[16:20]) != local_ip):
+                continue
+
+            tcp = packet[ip_header_len:]
+            src_port, dst_port, server_seq, ack_seq, _, flags, _, _, _ = struct.unpack(
+                "!HHLLBBHHH", tcp[:TCP_HEADER_SIZE]
+            )
+            if (src_port != peer_port or dst_port != local_port
+                    or flags != SYN_ACK_FLAGS or ack_seq != client_seq):
+                continue
+
+            next_server_seq = (server_seq + 1) & TCP_SEQUENCE_MASK
+            final_ack = build_tcp_packet(local_ip, peer_ip, local_port, peer_port,
+                                         client_seq, next_server_seq, ack=1)
+            ack_packet = (build_ip_header(local_ip, peer_ip, socket.IPPROTO_TCP,
+                                         len(final_ack)) + final_ack)
+            connection = conn_struct(
+                client_ip=peer_ip,
+                client_port=peer_port,
+                server_ip=local_ip,
+                server_port=local_port,
+                state="ESTABLISHED",
+                server_seq=client_seq,
+                client_seq=next_server_seq,
+                expected_final_ack=next_server_seq,
+                last_activity=time.time(),
+            )
+
+            with connections_lock:
+                connections[peer_key] = connection
+            try:
+                s.sendto(ack_packet, (peer_ip, 0))
+            except OSError as exc:
+                with connections_lock:
+                    connections.pop(peer_key, None)
+                print(f"[Streap_raw] Warning: Cannot finish handshake: {exc}")
+                break
+
+            print(f"[Streap_raw] Connected to {peer_ip}:{peer_port}")
+            return connection
+
+    remove_packet_queue(peer_key)
+    print(f"[Streap_raw] Warning: Connection to {peer_ip}:{peer_port} failed")
+    return None
 
 def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
     """
