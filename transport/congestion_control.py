@@ -57,6 +57,8 @@ class CControl:
 
         with self._wnd_lock:
             if self._in_flight + data_size > self._cwnd:
+                print(f"[CControl] BLOCK data_size={data_size} cwnd={self._cwnd:.1f} "
+                      f"in_flight_size={self._in_flight}")
                 return False
 
             self._in_flight += data_size
@@ -82,12 +84,17 @@ class CControl:
             self._in_flight -= ack_bytes
 
             if self._in_fast_recovery:
+                print(f"[CControl] ACK acked_size={ack_bytes} in_flight_size={self._in_flight} "
+                      f"cwnd={self._cwnd:.1f}")
                 return
 
+            old_cwnd = self._cwnd
             if self._cwnd < self._ssthresh:
                 self._cwnd += min(ack_bytes, MAX_SEGMENT_SIZE)
             else:
                 self._cwnd += MAX_SEGMENT_SIZE * ack_bytes / self._cwnd
+            print(f"[CControl] ACK acked_size={ack_bytes} in_flight_size={self._in_flight} "
+                  f"cwnd={old_cwnd:.1f}->{self._cwnd:.1f}")
 
     def account_drop(self, drop_bytes):
         """
@@ -98,6 +105,7 @@ class CControl:
         """
         with self._wnd_lock:
             self._in_flight -= drop_bytes
+            print(f"[CControl] DROP dropped_size={drop_bytes} in_flight_size={self._in_flight}")
 
     def switch_fast_recovery(self, session, lseq_list):
         """
@@ -117,6 +125,8 @@ class CControl:
             self._ssthresh = max(self._cwnd / 2, MIN_SSTHRESH)
             self._cwnd = self._ssthresh
             self._in_fast_recovery = True
+            print(f"[CControl] FAST RECOVERY cwnd={self._cwnd:.1f} "
+                  f"ssthresh={self._ssthresh:.1f}")
 
     def finish_fast_recovery(self):
         """
@@ -130,6 +140,7 @@ class CControl:
         """
         with self._wnd_lock:
             self._in_fast_recovery = False
+            print(f"[CControl] Recovery ended cwnd={self._cwnd:.1f}")
 
     def on_timeout(self):
         """
@@ -145,3 +156,5 @@ class CControl:
             self._ssthresh = max(self._cwnd / 2, MIN_SSTHRESH)
             self._cwnd = float(MIN_CWND)
             self._in_fast_recovery = False
+            print(f"[CControl] TIMEOUT cwnd={self._cwnd:.1f} "
+                  f"ssthresh={self._ssthresh:.1f}")

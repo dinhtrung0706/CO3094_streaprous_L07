@@ -71,7 +71,10 @@ class Transmitter:
             # Apply Karn's formula
             self._rtt_var = (1 - RTT_VAR_RCONST) * self._rtt_var + RTT_VAR_RCONST * abs(self._srtt - r)
             self._srtt = (1 - SRTT_RCONST) * self._srtt + SRTT_RCONST * r
+            old_rto = self._rto
             self._rto = max(MIN_RTO, min(MAX_RTO, self._srtt + max(TIME_GRANULARITY, RTO_VAR_MCONST * self._rtt_var)))
+            print(f"[Transmitter] RTT={r:.3f}s srtt={self._srtt:.3f}s "
+                  f"rto={old_rto:.3f}->{self._rto:.3f}s")
         return True
 
     def pacing_time_before_send(self, nr_packets):
@@ -103,6 +106,7 @@ class Transmitter:
 
             attempts.append(time.monotonic())
 
+        print(f"[Transmitter] FAST RETX key={packet_key} retry={len(attempts) - 1}")
         return session.retransmit_packet(packet_key)
 
     def _on_deadline(self, session, current_time = None):
@@ -128,14 +132,18 @@ class Transmitter:
                     # Move it to the drop list
                     self._drop_list.append(packet_key)
                     del self._pktmeta[packet_key]
+                    print(f"[Transmitter] DROP key={packet_key} retries={len(attempts) - 1}")
                 else:
                     attempts.append(current_time)
                     retransmit_packets.append(packet_key)
+                    print(f"[Transmitter] TIMEOUT key={packet_key} retry={len(attempts) - 1}")
 
         if retransmit_packets:
             # Because previous retransmission failed, we increase RTO
             with self._time_lock:
+                old_rto = self._rto
                 self._rto = min(MAX_RTO, 2 * self._rto)
+                print(f"[Transmitter] RTO {old_rto:.3f}->{self._rto:.3f}s")
 
             session._ccontrol.on_timeout()
 

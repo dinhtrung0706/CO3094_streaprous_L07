@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Union
 
 from .ack_track import ACKTracker, lseq_next, lseq_range
 from .congestion_control import CControl
+from .connection_interface import ConnectionInterface
 from .constant import (
     PK_ILANE, PK_ITRANSID, PK_ILSEQ, MAX_RECEIVE_BUFFER, MAX_SEGMENT_SIZE,
     MASK_PSEQ, TRANSFER_ID_SIZE, ZERO_WINDOW_PROBE_INTERVAL,
@@ -30,7 +31,7 @@ class Session:
     Manage packet sending and receiving over an established connection.
     """
 
-    def __init__(self, conn, max_retries, receive_dir="Downloads"):
+    def __init__(self, conn: ConnectionInterface, max_retries, receive_dir="Downloads"):
         """
         Initialize lane trackers and shared transport controls.
 
@@ -49,9 +50,9 @@ class Session:
         self._next_packet_seq = 0
         self._last_window_seq = None
 
-        self._transmitter = Transmitter(conn._handshake_rtt, max_retries)
-        self._fcontrol = FControl(conn._rwnd)
-        self._ccontrol = CControl(conn._cwnd, conn._cwnd / 2)
+        self._transmitter = Transmitter(conn.handshake_rtt, max_retries)
+        self._fcontrol = FControl(conn.rwnd)
+        self._ccontrol = CControl(conn.cwnd, conn.cwnd / 2)
 
         self._pending_packets = {} # { packet_key : Packet }
         self._send_lock = threading.Lock()
@@ -217,6 +218,13 @@ class Session:
                 print("[Session] Warning: Incomplete packet send")
                 return is_data
 
+            kind = "DATA" if is_data else "ACK" if packet.flags & ACK else "PROBE"
+            transfer_id = (self._transfer_id(packet)
+                           if packet.lane == TRANSFER and packet.flags & (DATA | ACK)
+                           else None)
+            print(f"[Session] TX {kind} lane={packet.lane} id={transfer_id} "
+                  f"seq={packet.logical_seq} ack={packet.ack_seq} "
+                  f"pseq={packet.packet_seq} packet_size={packet_size}")
             return True
 
     def send_next_chunk(self, buffer: SendBuffer,
@@ -285,6 +293,8 @@ class Session:
             if bytes_sent != len(encoded):
                 print("[Session] Warning: Incomplete retransmission")
                 return False
+            print(f"[Session] RETX id={transfer_id} seq={logical_seq} "
+                  f"pseq={packet.packet_seq} packet_size={len(encoded)}")
             return True
 
     def _update_peer_window(self, packet: Packet):
@@ -379,6 +389,7 @@ class Session:
                 self._update_peer_window(packet)
                 return
 
+            previous_ack = tracker.cumulative_ack()
             tracker.acknowledge(
                 packet.ack_seq, ranges,
                 (
@@ -411,6 +422,9 @@ class Session:
             if flow_bytes:
                 self._fcontrol.account_ack(flow_bytes)
             self._update_peer_window(packet)
+            print(f"[Session] ACK id={transfer_id} cum={previous_ack}->{tracker.cumulative_ack()} "
+                  f"range_count={len(ranges)} acked_packet_size={congestion_bytes} "
+                  f"pending_count={len(self._pending_packets)}")
 
     def handle_dropped_packets(self, packet_keys):
         """
@@ -459,7 +473,10 @@ class Session:
         """
         buffer = self._recv_buffers[transfer_id]
         output = self._file_outputs[transfer_id]
-        return buffer.flush_to_file(output)
+        result = buffer.flush_to_file(output)
+        if isinstance(result, tuple):
+            print(f"[Session] FLUSH id={transfer_id} seq={result[0]}..{result[1]}")
+        return result
 
     def _complete_receive_file(self, transfer_id: int) -> int:
         """
@@ -489,6 +506,7 @@ class Session:
         self._file_outputs.pop(transfer_id)
         self._recv_buffers.pop(transfer_id, None)
         self._completed_files[transfer_id] = completed_path
+        print(f"[Session] FILE complete id={transfer_id} path={completed_path}")
         return RECV_STORED
 
     def register_receive_file(self, transfer_id: int) -> Optional[Path]:
@@ -526,6 +544,7 @@ class Session:
 
             self._acquire_receive_buffer(transfer_id)
             self._file_outputs[transfer_id] = output
+            print(f"[Session] FILE open id={transfer_id} path={path}")
 
             if self._flush_receive_file(transfer_id) == RECV_ERROR:
                 self._file_outputs.pop(transfer_id, None)
@@ -734,6 +753,7 @@ class Session:
             if self._aborted:
                 return
             self._aborted = True
+            print(f"[Session] ABORT pending_count={len(self._pending_packets)}")
 
         self._conn.unregister_disconnect_handler(self.abort)
         self._wait_close_probe()
@@ -781,9 +801,16 @@ class Session:
         if packet.flags & DATA:
             with self._recv_lock:
                 status = self.handle_data(packet)
+                transfer_id = self._transfer_id(packet) if packet.lane == TRANSFER else None
+                data_size = len(packet.payload)
+                if packet.lane == TRANSFER:
+                    data_size -= TRANSFER_ID_SIZE
+                print(f"[Session] RX DATA id={transfer_id} seq={packet.logical_seq} "
+                      f"data_size={data_size} status={status}")
                 if status in (RECV_STORED, RECV_DUPLICATE):
                     response = self._schedule_ack(packet, status)
         elif packet.flags == PROBE:
+            print(f"[Session] RX PROBE rwnd={packet.rwnd}")
             with self._recv_lock:
                 response = self._make_ack(packet)
         elif packet.flags & ACK:

@@ -2,6 +2,8 @@
 Provide raw TCP send and receive operations.
 """
 
+from .connection_interface import ConnectionInterface
+
 from streaprous_socket.streaprous_raw_connection import (
     conn_struct,
     run_conn_recv,
@@ -11,7 +13,7 @@ from streaprous_socket.streaprous_raw_connection import (
 )
 
 
-class Connection:
+class Connection(ConnectionInterface):
     """
     Store connection details and exchange raw TCP payloads with a peer.
     """
@@ -70,6 +72,18 @@ class Connection:
             client_ip, client_port, server_ip, server_port, state,
             server_seq, client_seq, expected_final_ack, last_activity
         )
+
+    @property
+    def handshake_rtt(self):
+        return self._handshake_rtt
+
+    @property
+    def cwnd(self):
+        return self._cwnd
+
+    @property
+    def rwnd(self):
+        return self._rwnd
 
     def register_disconnect_handler(self, handler):
         """

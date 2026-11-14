@@ -10,6 +10,7 @@ from .ack_track import (
     newer,
 )
 from .congestion_control import CControl
+from .connection_interface import ConnectionInterface
 from .connection import Connection
 from .constant import (
     ACK_MILESTONE_BYTES,
@@ -64,6 +65,7 @@ __all__ = [
     "ACKTracker",
     "CControl",
     "Connection",
+    "ConnectionInterface",
     "CONTROL",
     "DATA",
     "decode_ack_ranges",

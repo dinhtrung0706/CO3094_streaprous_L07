@@ -54,6 +54,8 @@ class FControl:
         if rwnd < 0:
             raise ValueError("Receive window cannot be negative")
         with self._lock:
+            if rwnd != self._rwnd:
+                print(f"[FControl] rwnd {self._rwnd}->{rwnd}")
             self._rwnd = rwnd
 
     def can_send(self, data_size):
@@ -83,6 +85,8 @@ class FControl:
             raise ValueError("Data size must be positive")
         with self._lock:
             if self._outstanding + data_size > self._rwnd:
+                print(f"[FControl] BLOCK data_size={data_size} rwnd={self._rwnd} "
+                      f"outstanding_size={self._outstanding}")
                 return False
 
             self._outstanding += data_size
