@@ -32,6 +32,7 @@ import os
 import re
 import time
 from http import HTTPStatus
+from typing import Optional
 from urllib.parse import unquote
 from typing import Optional
 
