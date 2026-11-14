@@ -3,7 +3,6 @@ Encode and decode framed CONTROL and TRANSFER packets.
 """
 
 import struct
-from dataclasses import dataclass
 from typing import List, Tuple
 
 from .constant import (
@@ -69,20 +68,41 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
             raise ValueError("TRANSFER packet is missing its identifier or ACK ranges")
 
 
-@dataclass
 class Packet:
     """
     Represent one framed transport packet.
     """
 
-    version: int
-    lane: int
-    flags: int
-    logical_seq: int
-    ack_seq: int
-    packet_seq: int
-    rwnd: int
-    payload: bytes = b""
+    def __init__(self, version: int, lane: int, flags: int,
+                 logical_seq: int, ack_seq: int, packet_seq: int,
+                 rwnd: int, payload: bytes = b""):
+        self.version = version
+        self.lane = lane
+        self.flags = flags
+        self.logical_seq = logical_seq
+        self.ack_seq = ack_seq
+        self.packet_seq = packet_seq
+        self.rwnd = rwnd
+        self.payload = payload
+
+    def __repr__(self):
+        return ("Packet(version={!r}, lane={!r}, flags={!r}, "
+                "logical_seq={!r}, ack_seq={!r}, packet_seq={!r}, "
+                "rwnd={!r}, payload={!r})").format(
+                    self.version, self.lane, self.flags, self.logical_seq,
+                    self.ack_seq, self.packet_seq, self.rwnd, self.payload
+                )
+
+    def __eq__(self, other):
+        if type(self) is not type(other):
+            return NotImplemented
+        return (
+            self.version, self.lane, self.flags, self.logical_seq,
+            self.ack_seq, self.packet_seq, self.rwnd, self.payload
+        ) == (
+            other.version, other.lane, other.flags, other.logical_seq,
+            other.ack_seq, other.packet_seq, other.rwnd, other.payload
+        )
 
     def encode(self) -> bytes:
         """
