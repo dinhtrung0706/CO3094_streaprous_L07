@@ -165,6 +165,15 @@ class Transmitter:
             if self._thread is not None:
                 self._thread.join()
 
+    def abort(self):
+        """
+        Stop retransmission and discard packet metadata.
+        """
+        self.stop_thread_deadline()
+        with self._list_lock:
+            self._pktmeta.clear()
+            self._drop_list.clear()
+
     def flush_drop_list(self):
         """
         Retrieve drop packet list and remove all entries in the drop list buffer

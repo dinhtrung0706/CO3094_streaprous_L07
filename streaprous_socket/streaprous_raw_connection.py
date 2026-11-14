@@ -58,6 +58,57 @@ conn_struct = namedtuple('conn_struct', [
 # The mapping include {key: value} as { (client_ip, client_port): conn_struct }
 connections = {}
 connections_lock = threading.Lock()
+_connection_loss_handlers = {}
+
+
+def register_connection_loss_handler(conn_info, handler):
+    """
+    Register a handler for connection loss.
+
+    Args:
+        conn_info  established connection
+        handler    handler to notify
+    """
+    key = (conn_info.client_ip, conn_info.client_port)
+    with connections_lock:
+        active = key in connections
+        if active:
+            _connection_loss_handlers.setdefault(key, set()).add(handler)
+    if not active:
+        handler()
+
+
+def unregister_connection_loss_handler(conn_info, handler):
+    """
+    Remove a connection-loss handler.
+
+    Args:
+        conn_info  established connection
+        handler    registered handler
+    """
+    key = (conn_info.client_ip, conn_info.client_port)
+    with connections_lock:
+        handlers = _connection_loss_handlers.get(key)
+        if handlers is not None:
+            handlers.discard(handler)
+            if not handlers:
+                del _connection_loss_handlers[key]
+
+
+def notify_connection_loss(client_key):
+    """
+    Notify all sessions associated with a removed connection.
+
+    Args:
+        client_key  client address and port
+    """
+    with connections_lock:
+        handlers = _connection_loss_handlers.pop(client_key, ())
+    for handler in handlers:
+        try:
+            handler()
+        except Exception as exc:
+            print(f"[Streap_raw] Warning: Connection-loss handler failed: {exc}")
 
 # Management structure to serialize the 3-way handshake
 # Each hand shake is manage by a unique ID client_key
@@ -301,6 +352,9 @@ def clean_expired_connections(timeout=60):
             for k in expired:
                 print(f"[Streap_raw] clean_expired_connections: Session [{k[0]}:{k[1]}] Connection timed out ({timeout}s inactivity). Remove connection.")
                 del connections[k]
+        for key in expired:
+            remove_packet_queue(key)
+            notify_connection_loss(key)
 
 
 def create_raw_socket() -> socket.socket:
@@ -697,6 +751,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                     connections.pop(client_key, None)
                 # Clean up packet queue
                 remove_packet_queue(client_key)
+                notify_connection_loss(client_key)
                 return b""
 
             # Handle RST (connection reset)
@@ -706,6 +761,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                     connections.pop(client_key, None)
                 # Clean up packet queue
                 remove_packet_queue(client_key)
+                notify_connection_loss(client_key)
                 return b""
 
             # Update last activity
@@ -833,9 +889,14 @@ def close_connection(s: socket.socket, conn_info: conn_struct):
 
     # Clean up packet queue
     remove_packet_queue(client_key)
+    notify_connection_loss(client_key)
 
 
 def close_all_connections():
     """Close all connections and clean up."""
     with connections_lock:
+        keys = list(connections)
         connections.clear()
+    for key in keys:
+        remove_packet_queue(key)
+        notify_connection_loss(key)

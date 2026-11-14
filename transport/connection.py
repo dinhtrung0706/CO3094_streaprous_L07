@@ -6,6 +6,8 @@ from streaprous_socket.streaprous_raw_connection import (
     conn_struct,
     run_conn_recv,
     run_conn_send,
+    register_connection_loss_handler,
+    unregister_connection_loss_handler,
 )
 
 
@@ -68,6 +70,24 @@ class Connection:
             client_ip, client_port, server_ip, server_port, state,
             server_seq, client_seq, expected_final_ack, last_activity
         )
+
+    def register_disconnect_handler(self, handler):
+        """
+        Notify a handler when this connection is lost.
+
+        Args:
+            handler  connection-loss handler
+        """
+        register_connection_loss_handler(self._conn_info, handler)
+
+    def unregister_disconnect_handler(self, handler):
+        """
+        Remove a connection-loss handler.
+
+        Args:
+            handler  registered handler
+        """
+        unregister_connection_loss_handler(self._conn_info, handler)
 
     def send_data_segment(self, payload: bytes) -> int:
         """
