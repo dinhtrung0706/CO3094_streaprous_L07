@@ -1,17 +1,18 @@
 """
-Encode and decode framed CONTROL, MESSAGE, and FILE packets.
+Encode and decode framed CONTROL and TRANSFER packets.
 """
 
 import struct
 from dataclasses import dataclass
 
-from .constant import MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES
+from .constant import (
+    ACK_RANGE_COUNT_SIZE, MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES, TRANSFER_ID_SIZE,
+)
 
-VERSION = 1
+VERSION = 2
 
 CONTROL = 0
-MESSAGE = 1
-FILE = 2
+TRANSFER = 1
 
 DATA = 0x01
 ACK = 0x02
@@ -21,7 +22,7 @@ EOM = 0x08
 HEADER_FORMAT = "!BBBBHHIHH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
-VALID_LANES = (CONTROL, MESSAGE, FILE)
+VALID_LANES = (CONTROL, TRANSFER)
 VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE)
 
 
@@ -31,7 +32,7 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
 
     Args:
         version: Protocol version.
-        lane: CONTROL, MESSAGE, or FILE.
+        lane: CONTROL or TRANSFER.
         flags: Packet operation flags.
         logical_seq: Logical sequence number for the lane.
         ack_seq: Cumulative logical ACK number.
@@ -59,6 +60,12 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
             raise ValueError("Packet field out of range")
     if flags in (PROBE, ACK | PROBE) and payload_len:
         raise ValueError("Window probes must have empty payloads")
+    if lane == TRANSFER and flags & (DATA | ACK):
+        required = TRANSFER_ID_SIZE
+        if flags & ACK:
+            required += ACK_RANGE_COUNT_SIZE
+        if payload_len < required:
+            raise ValueError("TRANSFER packet is missing its identifier or ACK ranges")
 
 
 @dataclass
