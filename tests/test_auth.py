@@ -1,6 +1,8 @@
 import base64
 import json
+import time
 import unittest
+from unittest import mock
 
 from daemon.auth import AuthService
 from daemon.database import Database
@@ -207,6 +209,41 @@ class AuthTests(unittest.TestCase):
 
         self.assertIs(installed, self.service)
         self.assertEqual(len(self.app.routes.before_request_hooks), hook_count)
+
+    def test_peer_token_round_trip(self):
+        token = self.service.issue_peer_token("alice")
+        self.assertEqual(self.service.verify_peer_token(token), "alice")
+
+    def test_peer_token_rejects_tampering(self):
+        token = self.service.issue_peer_token("alice")
+        payload, signature = token.split(".")
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        tampered = base64.urlsafe_b64encode(
+            raw.replace(b"alice", b"alicf")
+        ).rstrip(b"=").decode("ascii")
+        self.assertIsNone(self.service.verify_peer_token(f"{tampered}.{signature}"))
+        self.assertIsNone(self.service.verify_peer_token(token + "x"))
+
+    def test_peer_token_rejects_garbage(self):
+        for value in ("", "no-dot", "a.b", None, 42):
+            with self.subTest(value=value):
+                self.assertIsNone(self.service.verify_peer_token(value))
+
+    def test_peer_token_expires(self):
+        token = self.service.issue_peer_token("alice", ttl=60)
+        future = time.time() + 3600
+        with mock.patch("daemon.auth.time.time", return_value=future):
+            self.assertIsNone(self.service.verify_peer_token(token))
+
+    def test_peer_token_is_bound_to_the_signing_key(self):
+        other = AuthService(
+            Database(":memory:"),
+            signing_key=b"a completely different signing key!!",
+            password_iterations=1000,
+        )
+        self.addCleanup(other.database.close)
+        self.assertIsNone(other.verify_peer_token(self.service.issue_peer_token("alice")))
+
 
 
 if __name__ == "__main__":

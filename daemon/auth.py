@@ -162,6 +162,49 @@ class AuthService:
         message = purpose + b":" + value.encode("ascii")
         return _b64url(hmac.new(self._signing_key, message, hashlib.sha256).digest())
 
+    def issue_peer_token(self, username, ttl=3600):
+        """Return a signed token proving ``username`` to another peer."""
+        if not isinstance(username, str) or not username:
+            raise ValueError("username is required")
+        ttl = int(ttl)
+        if ttl <= 0:
+            raise ValueError("ttl must be positive")
+        expires_at = int(time.time()) + ttl
+        payload = f"{username}|{expires_at}".encode("utf-8")
+        signature = hmac.new(
+            self._signing_key, b"peer:" + payload, hashlib.sha256
+        ).digest()
+        return _b64url(payload) + "." + _b64url(signature)
+
+    def verify_peer_token(self, token):
+        """Return the username for a valid token, otherwise ``None``."""
+        if not isinstance(token, str) or token.count(".") != 1:
+            return None
+        encoded_payload, encoded_signature = token.split(".")
+        try:
+            payload = base64.urlsafe_b64decode(
+                encoded_payload + "=" * (-len(encoded_payload) % 4)
+            )
+            signature = base64.urlsafe_b64decode(
+                encoded_signature + "=" * (-len(encoded_signature) % 4)
+            )
+        except (ValueError, TypeError):
+            return None
+        expected = hmac.new(
+            self._signing_key, b"peer:" + payload, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(signature, expected):
+            return None
+        username, _separator, expires_at = payload.decode("utf-8", "replace").rpartition("|")
+        try:
+            expires_at = int(expires_at)
+        except ValueError:
+            return None
+        if not username or expires_at < int(time.time()):
+            return None
+        return username
+
+
     def _csrf_for_token(self, token):
         return self._signature(b"csrf", token)
 
@@ -327,7 +370,14 @@ class AuthService:
         return self
 
 
-def install_auth(app, database_path=None, *, signing_key=None, cookie_secure=None):
+def install_auth(
+    app,
+    database_path=None,
+    *,
+    signing_key=None,
+    cookie_secure=None,
+    password_iterations=None,
+):
     """Install account endpoints on an app using environment-based settings."""
     existing = getattr(app, "_streaprous_auth_service", None)
     if existing is not None:
@@ -340,9 +390,12 @@ def install_auth(app, database_path=None, *, signing_key=None, cookie_secure=Non
         cookie_secure = os.environ.get(
             "STREAPROUS_COOKIE_SECURE", ""
         ).strip().lower() in ("1", "true", "yes", "on")
-    service = AuthService(
-        database_path,
-        signing_key=signing_key,
-        cookie_secure=cookie_secure,
-    )
+    options = {
+        "signing_key": signing_key,
+        "cookie_secure": cookie_secure,
+    }
+    if password_iterations is not None:
+        options["password_iterations"] = int(password_iterations)
+    service = AuthService(database_path, **options)
     return service.install(app)
+

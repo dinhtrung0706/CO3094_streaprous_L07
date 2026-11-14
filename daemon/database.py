@@ -52,8 +52,60 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx
                     ON sessions(expires_at);
+
+                CREATE TABLE IF NOT EXISTS peers (
+                    username TEXT NOT NULL COLLATE NOCASE,
+                    ip TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    last_seen INTEGER NOT NULL,
+                    PRIMARY KEY (username, ip, port)
+                );
+
+                CREATE TABLE IF NOT EXISTS channels (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS channel_members (
+                    channel_id TEXT NOT NULL REFERENCES channels(id)
+                        ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id)
+                        ON DELETE CASCADE,
+                    joined_at INTEGER NOT NULL,
+                    PRIMARY KEY (channel_id, user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    channel_id TEXT NOT NULL REFERENCES channels(id)
+                        ON DELETE CASCADE,
+                    sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL DEFAULT '*',
+                    body TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    seq INTEGER NOT NULL,
+                    UNIQUE(channel_id, seq)
+                );
+
+                CREATE INDEX IF NOT EXISTS messages_channel_seq_idx
+                    ON messages(channel_id, seq);
                 """
             )
+            # Older Phase 4 databases were created before direct messages had
+            # a recipient column.
+            columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(messages)"
+                ).fetchall()
+            }
+            if "recipient" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE messages ADD COLUMN recipient TEXT "
+                    "NOT NULL DEFAULT '*'"
+                )
 
     @staticmethod
     def _user_record(row):
@@ -149,6 +201,182 @@ class Database:
             cursor = self._connection.execute(
                 "DELETE FROM sessions WHERE expires_at <= ?",
                 (now,),
+            )
+            return cursor.rowcount
+
+    @staticmethod
+    def _rows(cursor):
+        return [dict(row) for row in cursor.fetchall()]
+
+    def create_channel(self, channel_id, name, owner_id, created_at):
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO channels
+                    (id, name, owner_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (channel_id, name, owner_id, created_at),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM channels WHERE id = ?", (channel_id,)
+            ).fetchone()
+        return dict(row)
+
+    def get_channel(self, channel_id):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM channels WHERE id = ?", (channel_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_channel_by_name(self, name):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM channels WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_channels(self, user_id):
+        with self._lock:
+            cursor = self._connection.execute(
+                """
+                SELECT channels.*,
+                       (SELECT COUNT(*) FROM channel_members AS members
+                        WHERE members.channel_id = channels.id) AS member_count,
+                       EXISTS(SELECT 1 FROM channel_members AS mine
+                              WHERE mine.channel_id = channels.id
+                                AND mine.user_id = ?) AS joined
+                FROM channels
+                ORDER BY channels.name COLLATE NOCASE
+                """,
+                (user_id,),
+            )
+            return self._rows(cursor)
+
+    def add_channel_member(self, channel_id, user_id, joined_at):
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO channel_members
+                    (channel_id, user_id, joined_at)
+                VALUES (?, ?, ?)
+                """,
+                (channel_id, user_id, joined_at),
+            )
+            return cursor.rowcount > 0
+
+    def remove_channel_member(self, channel_id, user_id):
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM channel_members
+                WHERE channel_id = ? AND user_id = ?
+                """,
+                (channel_id, user_id),
+            )
+            return cursor.rowcount > 0
+
+    def is_channel_member(self, channel_id, user_id):
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM channel_members
+                WHERE channel_id = ? AND user_id = ?
+                """,
+                (channel_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def get_message(self, message_id):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def append_message(self, message_id, channel_id, sender, body, created_at,
+                       recipient="*"):
+        """Insert one message, assigning the next per-channel sequence number.
+
+        The insert is idempotent: posting the same ``message_id`` twice returns
+        the stored row instead of creating a duplicate.
+        """
+        recipient = recipient or "*"
+        with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT * FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+
+            self._connection.execute(
+                """
+                INSERT INTO messages
+                    (id, channel_id, sender, recipient, body, created_at, seq)
+                SELECT ?, ?, ?, ?, ?, ?,
+                       (SELECT COALESCE(MAX(seq), 0) + 1
+                        FROM messages WHERE channel_id = ?)
+                """,
+                (message_id, channel_id, sender, recipient, body, created_at,
+                 channel_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+        return dict(row)
+
+    def list_messages(self, channel_id, since=0, limit=100, viewer=None):
+        query = (
+            "SELECT * FROM messages "
+            "WHERE channel_id = ? AND seq > ?"
+        )
+        params = [channel_id, int(since)]
+        if viewer is not None:
+            query += (
+                " AND (recipient = '*' OR recipient = ? COLLATE NOCASE"
+                " OR sender = ? COLLATE NOCASE)"
+            )
+            params.extend([viewer, viewer])
+        query += " ORDER BY seq LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            cursor = self._connection.execute(query, params)
+            return self._rows(cursor)
+
+    def upsert_peer(self, username, ip, port, last_seen):
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO peers (username, ip, port, last_seen)
+                VALUES (?, ?, ?, ?)
+                """,
+                (username, ip, int(port), int(last_seen)),
+            )
+            row = self._connection.execute(
+                """
+                SELECT * FROM peers
+                WHERE username = ? COLLATE NOCASE AND ip = ? AND port = ?
+                """,
+                (username, ip, int(port)),
+            ).fetchone()
+        return dict(row)
+
+    def list_peers(self, not_before, exclude_username=None):
+        query = "SELECT * FROM peers WHERE last_seen >= ?"
+        params = [int(not_before)]
+        if exclude_username is not None:
+            query += " AND username <> ? COLLATE NOCASE"
+            params.append(exclude_username)
+        query += " ORDER BY username COLLATE NOCASE, port"
+        with self._lock:
+            cursor = self._connection.execute(query, params)
+            return self._rows(cursor)
+
+    def expire_peers(self, not_before):
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM peers WHERE last_seen < ?", (int(not_before),)
             )
             return cursor.rowcount
 

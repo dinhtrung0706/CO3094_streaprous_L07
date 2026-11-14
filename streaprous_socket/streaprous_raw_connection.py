@@ -368,7 +368,6 @@ def get_interface_ip(interface_name: Optional[str] = None) -> str:
         return "127.0.0.1"
 
 
-
 def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: Optional[str] = None) -> conn_struct:
     """
     Accept a new connection by performing the 3-way handshake using raw sockets.
