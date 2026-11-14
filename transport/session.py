@@ -424,7 +424,7 @@ class Session:
             self._update_peer_window(packet)
             print(f"[Session] ACK id={transfer_id} cum={previous_ack}->{tracker.cumulative_ack()} "
                   f"range_count={len(ranges)} acked_packet_size={congestion_bytes} "
-                  f"pending_count={len(self._pending_packets)}")
+                  f"unacked_data_packets={len(self._pending_packets)}")
 
     def handle_dropped_packets(self, packet_keys):
         """
@@ -753,7 +753,7 @@ class Session:
             if self._aborted:
                 return
             self._aborted = True
-            print(f"[Session] ABORT pending_count={len(self._pending_packets)}")
+            print(f"[Session] ABORT unacked_data_packets={len(self._pending_packets)}")
 
         self._conn.unregister_disconnect_handler(self.abort)
         self._wait_close_probe()
