@@ -57,9 +57,7 @@ class Route:
         self.auth = auth
 
     def __repr__(self):
-        return "Route(path={!r}, methods={!r}, auth={!r})".format(
-            self.path, self.methods, self.auth
-        )
+        return f"Route(path={self.path!r}, methods={self.methods!r}, auth={self.auth!r})"
 
 
 class StreapRous:

@@ -25,7 +25,7 @@ import struct
 import threading
 
 DEFAULT_QUEUE_MAXSIZE = 1024
-_TIMEOUT_ERRORS = (socket.timeout, TimeoutError)
+_TIMEOUT_ERRORS = (socket.timeout, socket.timeout)
 
 _packet_queues = {}
 _packet_dispatcher_thread = None
@@ -112,8 +112,7 @@ def _packet_dispatcher(s, listen_port):
                             queue.Queue(maxsize=DEFAULT_QUEUE_MAXSIZE),
                         )
                         print(
-                            "[Sock_dispatcher] Route SYN packet to SYN "
-                            f"queue for {key}"
+                            f"[Sock_dispatcher] Route SYN packet to SYN queue for {key}"
                         )
                     else:
                         print(
@@ -128,9 +127,7 @@ def _packet_dispatcher(s, listen_port):
                 except queue.Full:
                     pass
             except (IndexError, OSError, struct.error, ValueError) as exc:
-                print(
-                    f"[Sock_dispatcher] Dispatcher error: {exc}"
-                )
+                print(f"[Sock_dispatcher] Dispatcher error: {exc}")
     finally:
         with _packet_dispatcher_lock:
             if (
@@ -159,10 +156,7 @@ def start_packet_dispatcher(s, listen_port):
             and _packet_dispatcher_thread is not None
             and _packet_dispatcher_thread.is_alive()
         ):
-            if (
-                s is _current_raw_socket
-                and listen_port == _current_listen_port
-            ):
+            if s is _current_raw_socket and listen_port == _current_listen_port:
                 return
             _packet_dispatcher_running = False
             old_thread = _packet_dispatcher_thread
@@ -186,10 +180,7 @@ def start_packet_dispatcher(s, listen_port):
             name=f"packet-dispatcher-{listen_port}",
         )
         _packet_dispatcher_thread.start()
-        print(
-            "[Sock_dispatcher] Start dispatching packet for port "
-            f"{listen_port}"
-        )
+        print(f"[Sock_dispatcher] Start dispatching packet for port {listen_port}")
 
 
 def stop_packet_dispatcher():
@@ -225,9 +216,7 @@ def get_packet_queue(client_key):
     """
     with _packet_dispatcher_lock:
         if client_key not in _packet_queues:
-            _packet_queues[client_key] = queue.Queue(
-                maxsize=DEFAULT_QUEUE_MAXSIZE
-            )
+            _packet_queues[client_key] = queue.Queue(maxsize=DEFAULT_QUEUE_MAXSIZE)
         return _packet_queues[client_key]
 
 

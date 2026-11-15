@@ -15,10 +15,10 @@ INITIAL_SSTHRESH = 16
 TICK_SECONDS = 0.05
 
 
-class Pending(object):
+class Pending:
     """One unacknowledged outbound frame."""
 
-    __slots__ = ("frame", "first_sent", "sent_at", "retries")
+    __slots__ = ("first_sent", "frame", "retries", "sent_at")
 
     def __init__(self, frame, first_sent, sent_at, retries=0):
         self.frame = frame
@@ -177,7 +177,7 @@ class SendWindow:
             return []
         ready = []
         for pending in list(self.unacked.values()):
-            timeout = self.rto * (2 ** pending.retries)
+            timeout = self.rto * (2**pending.retries)
             if now - pending.sent_at < timeout:
                 continue
             if pending.retries >= self.max_retries:
@@ -226,9 +226,7 @@ class ReliableChannel:
     ):
         self.address = address
         self.clock = clock
-        self.send = SendWindow(
-            capacity, rto=rto, max_retries=max_retries
-        )
+        self.send = SendWindow(capacity, rto=rto, max_retries=max_retries)
         self.recv = RecvWindow(capacity)
         self.peer_window = capacity
         self.last_seen = clock()
