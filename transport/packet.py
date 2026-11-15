@@ -1,0 +1,245 @@
+"""
+Encode and decode framed CONTROL and TRANSFER packets.
+"""
+
+import struct
+from typing import List, Tuple
+
+from .constant import (
+    ACK_RANGE_ENCODED_SIZE, MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES, TRANSFER_ID_SIZE,
+    X25519_PUBLIC_KEY_SIZE,
+)
+
+VERSION = 2
+
+CONTROL = 0
+TRANSFER = 1
+
+DATA = 0x01
+ACK = 0x02
+PROBE = 0x04
+EOM = 0x08
+PING = 0x10
+PONG = 0x20
+HELLO = 0x40
+
+HEADER_FORMAT = "!BBBBHHIHH"
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+VALID_LANES = (CONTROL, TRANSFER)
+VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE, PING, PONG, HELLO)
+
+
+def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
+    """
+    Check that every header field has a valid value.
+
+    Args:
+        version: Protocol version.
+        lane: CONTROL or TRANSFER.
+        flags: Packet operation flags.
+        logical_seq: Logical sequence number for the lane.
+        ack_seq: Cumulative logical ACK number.
+        packet_seq: Physical packet identifier.
+        rwnd: Advertised receive window.
+        payload_len: Payload size in bytes.
+
+    Returns:
+        None if all fields are valid.
+    """
+    if version != VERSION:
+        raise ValueError("Unsupported packet version")
+    if lane not in VALID_LANES:
+        raise ValueError("Invalid packet lane")
+    if flags not in VALID_FLAGS:
+        raise ValueError("Invalid packet flags")
+    for value, maximum in (
+        (logical_seq, MASK_LSEQ),
+        (ack_seq, MASK_LSEQ),
+        (packet_seq, MASK_PSEQ),
+        (rwnd, 0xFFFF),
+        (payload_len, 0xFFFF),
+    ):
+        if not isinstance(value, int) or not 0 <= value <= maximum:
+            raise ValueError("Packet field out of range")
+    if flags in (PROBE, ACK | PROBE) and payload_len:
+        raise ValueError("Window probes must have empty payloads")
+    if flags in (PING, PONG) and (lane != CONTROL or payload_len):
+        raise ValueError("PING/PONG require CONTROL lane and empty payload")
+    if flags == HELLO and (lane != CONTROL or payload_len != X25519_PUBLIC_KEY_SIZE):
+        raise ValueError("HELLO requires a 32-byte CONTROL payload")
+    if lane == TRANSFER and flags & (DATA | ACK):
+        required = TRANSFER_ID_SIZE
+        if flags & ACK:
+            required += ACK_RANGE_ENCODED_SIZE
+        if payload_len < required:
+            raise ValueError("TRANSFER packet is missing its identifier or ACK ranges")
+
+
+class Packet:
+    """
+    Represent one framed transport packet.
+    """
+
+    def __init__(self, version: int, lane: int, flags: int,
+                 logical_seq: int, ack_seq: int, packet_seq: int,
+                 rwnd: int, payload: bytes = b""):
+        self.version = version
+        self.lane = lane
+        self.flags = flags
+        self.logical_seq = logical_seq
+        self.ack_seq = ack_seq
+        self.packet_seq = packet_seq
+        self.rwnd = rwnd
+        self.payload = payload
+
+    def __repr__(self):
+        return ("Packet(version={!r}, lane={!r}, flags={!r}, "
+                "logical_seq={!r}, ack_seq={!r}, packet_seq={!r}, "
+                "rwnd={!r}, payload={!r})").format(
+                    self.version, self.lane, self.flags, self.logical_seq,
+                    self.ack_seq, self.packet_seq, self.rwnd, self.payload
+                )
+
+    def __eq__(self, other):
+        if type(self) is not type(other):
+            return NotImplemented
+        return (
+            self.version, self.lane, self.flags, self.logical_seq,
+            self.ack_seq, self.packet_seq, self.rwnd, self.payload
+        ) == (
+            other.version, other.lane, other.flags, other.logical_seq,
+            other.ack_seq, other.packet_seq, other.rwnd, other.payload
+        )
+
+    def encode(self) -> bytes:
+        """
+        Serialize this packet into a header and payload.
+
+        Args:
+            self: Packet to serialize.
+
+        Returns:
+            Encoded packet bytes in network byte order.
+        """
+        if not isinstance(self.payload, (bytes, bytearray)):
+            raise TypeError("Payload must be bytes")
+        _validate_fields(
+            self.version, self.lane, self.flags, self.logical_seq,
+            self.ack_seq, self.packet_seq, self.rwnd, len(self.payload)
+        )
+        header = struct.pack(
+            HEADER_FORMAT,
+            self.version, self.lane, self.flags, 0,
+            self.logical_seq, self.ack_seq, self.packet_seq,
+            self.rwnd, len(self.payload)
+        )
+        return header + self.payload
+
+    @classmethod
+    def decode(cls, data: bytes):
+        """
+        Decode exactly one complete packet.
+
+        Args:
+            cls: Packet class to construct.
+            data: Bytes containing one complete packet.
+
+        Returns:
+            Packet decoded from data.
+        """
+        packet, remaining = parse_buffer(data)
+        if packet is None:
+            raise ValueError("Incomplete packet")
+        if remaining:
+            raise ValueError("Unexpected bytes after packet")
+        return packet
+
+
+def parse_buffer(data: bytes):
+    """
+    Extract one complete packet from a byte buffer.
+
+    Args:
+        data: Received bytes, possibly containing multiple frames.
+
+    Returns:
+        (packet, remaining bytes), or (None, data) if incomplete.
+    """
+    if len(data) < HEADER_SIZE:
+        return None, data
+
+    version, lane, flags, reserved, logical_seq, ack_seq, packet_seq, rwnd, payload_len = (
+        struct.unpack_from(HEADER_FORMAT, data)
+    )
+    if reserved:
+        raise ValueError("Reserved header byte must be zero")
+    _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len)
+
+    total_size = HEADER_SIZE + payload_len
+    if len(data) < total_size:
+        return None, data
+
+    packet = Packet(
+        version, lane, flags, logical_seq, ack_seq,
+        packet_seq, rwnd, bytes(data[HEADER_SIZE:total_size])
+    )
+    return packet, data[total_size:]
+
+
+def encode_ack_ranges(ranges: List[Tuple[int, int]]) -> bytes:
+    """
+    Encode ordered, half-open ACK ranges into bytes.
+
+    Args:
+        ranges: A list of (start, end) sequence ranges.
+
+    Returns:
+        One-byte range count followed by 32-bit start/end pairs.
+    """
+    if len(ranges) > MAX_ACK_RANGES:
+        raise ValueError("Too many ACK ranges")
+
+    data = bytearray([len(ranges)])
+    previous_end = -1
+    for start, end in ranges:
+        if (not isinstance(start, int) or not isinstance(end, int)
+                or not 0 <= start < end <= MASK_PSEQ
+                or start < previous_end):
+            raise ValueError("Invalid ACK range")
+        data.extend(struct.pack("!II", start, end))
+        previous_end = end
+
+    return bytes(data)
+
+
+def decode_ack_ranges(data: bytes) -> List[Tuple[int, int]]:
+    """
+    Decode and validate ACK ranges from a packet payload.
+
+    Args:
+        data: Encoded range count and 32-bit start/end pairs.
+
+    Returns:
+        A list of ordered, half-open ACK ranges.
+    """
+    if not data:
+        raise ValueError("Missing ACK range count")
+
+    # Each pair has 64 bits = 8 bytes, we skip 8 bytes each previous pair
+    # + 1 is for the 1 byte that hold number of ranges
+    # thus, the general formula is 1 + i * 8 with i is the index
+    count = data[0]
+    if count > MAX_ACK_RANGES or len(data) != 1 + count * 8:
+        raise ValueError("Invalid ACK range payload length")
+
+    ranges = []
+    previous_end = -1
+    for index in range(count):
+        start, end = struct.unpack_from("!II", data, 1 + index * 8)
+        if start >= end or start < previous_end:
+            raise ValueError("Invalid ACK range")
+        ranges.append((start, end))
+        previous_end = end
+
+    return ranges

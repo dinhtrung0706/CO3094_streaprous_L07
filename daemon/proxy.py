@@ -75,6 +75,7 @@ PROXY_PASS = {
 _state_lock = threading.Lock()
 _round_robin_counters = {}
 _active_backends = {}
+_raw_session_lock = threading.Lock()
 
 
 def reset_proxy_state():
@@ -195,20 +196,19 @@ def _normalize_policy(policy):
 
 
 def _route_parts(route):
-    """Return (target, policy, set_headers) from a route config value."""
-    if isinstance(route, (tuple, list)):
-        if len(route) >= 3:
-            target, policy, headers = route[0], route[1], route[2]
-        elif len(route) == 2:
-            target, policy = route[0], route[1]
-            headers = {}
-        elif len(route) == 1:
-            target, policy, headers = route[0], "round-robin", {}
-        else:
-            raise ValueError("empty proxy route")
-    else:
-        target, policy, headers = route, "round-robin", {}
-    return target, _normalize_policy(policy), dict(headers or {})
+    """Return (target, policy, headers, transport) from a route."""
+    if not isinstance(route, (tuple, list)):
+        route = (route,)
+    if not route:
+        raise ValueError("empty proxy route")
+
+    target = route[0]
+    policy = route[1] if len(route) > 1 else "round-robin"
+    headers = route[2] if len(route) > 2 else {}
+    transport = route[3] if len(route) > 3 else "standard"
+    if transport not in ("standard", "session"):
+        raise ValueError("invalid proxy transport: {!r}".format(transport))
+    return target, _normalize_policy(policy), dict(headers or {}), transport
 
 
 def _backend_list(target):
@@ -255,7 +255,7 @@ def resolve_routing_policy(hostname, routes):
     route = _route_entry(hostname, routes)
     if route is None:
         return (None, None)
-    target, policy, _headers = _route_parts(route)
+    target, policy, _headers, _transport = _route_parts(route)
     backends = _backend_list(target)
     selected = _select_backend(str(hostname or ""), backends, policy)
     if selected is None:
@@ -268,7 +268,7 @@ def route_headers(hostname, routes):
     route = _route_entry(hostname, routes)
     if route is None:
         return {}
-    _target, _policy, headers = _route_parts(route)
+    _target, _policy, headers, _transport = _route_parts(route)
     return dict(headers)
 
 
@@ -355,6 +355,77 @@ def forward_request(
                 pass
 
     response = b"".join(chunks)
+    if not response:
+        raise BadGateway("backend returned an empty response")
+    if not response.startswith(b"HTTP/"):
+        raise BadGateway("backend returned a non-HTTP response")
+    return response
+
+
+def forward_session_request(
+    host, port, request, connect_timeout=None, read_timeout=None
+):
+    """Forward an HTTP exchange through a raw Session."""
+    from . import config
+    from .session_http import REQUEST_ID, RESPONSE_ID, receive_message, send_message
+    from streaprous_socket import streaprous_raw_connection as raw
+    from transport.connection import Connection
+    from transport.session import Session
+
+    timeout = PROXY_CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
+
+    # The raw dispatcher and connection table currently support one outgoing
+    # connection to a backend at a time.
+    with _raw_session_lock:
+        sock = None
+        info = None
+        session = None
+        try:
+            try:
+                peer_ip = socket.gethostbyname(host)
+                route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    route.connect((peer_ip, int(port)))
+                    local_ip = route.getsockname()[0]
+                finally:
+                    route.close()
+
+                sock = raw.create_raw_socket()
+                info = raw.connect(
+                    sock, local_ip, config.PROXY_RAW_PORT,
+                    peer_ip, int(port), timeout=timeout,
+                )
+            except TimeoutError:
+                raise GatewayTimeout("backend connection timed out")
+            except OSError as exc:
+                raise BadGateway("backend connection failed: {}".format(exc))
+
+            if info is None:
+                raise BadGateway("backend raw handshake failed")
+
+            connection = Connection(
+                socket=sock, **info._asdict(),
+                cwnd=config.SESSION_CWND,
+                rwnd=config.SESSION_RWND,
+                handshake_rtt=config.SESSION_RTT,
+            )
+            session = Session(connection, max_retries=config.SESSION_MAX_RETRIES)
+            if not send_message(session, _force_request_close(request), REQUEST_ID):
+                raise BadGateway("backend request transfer failed")
+            response = receive_message(session, RESPONSE_ID)
+        finally:
+            try:
+                if session is not None:
+                    session.abort()
+            finally:
+                if sock is not None:
+                    try:
+                        if info is not None:
+                            raw.close_connection(sock, info)
+                    finally:
+                        raw.stop_packet_dispatcher()
+                        sock.close()
+
     if not response:
         raise BadGateway("backend returned an empty response")
     if not response.startswith(b"HTTP/"):
@@ -486,6 +557,8 @@ def handle_client(ip, port, conn, addr, routes):
             return
 
         resolved_host, resolved_port = resolve_routing_policy(host_header, routes)
+        backend_transport = _route_parts(route)[3]
+
         if resolved_host is None:
             _send_error(
                 conn,
@@ -504,11 +577,14 @@ def handle_client(ip, port, conn, addr, routes):
         )
 
         backend_key = _backend_acquire(resolved_host, resolved_port)
-        response = forward_request(
-            resolved_host,
-            resolved_port,
-            upstream_request,
-        )
+        if backend_transport == "session":
+            response = forward_session_request(
+                resolved_host, resolved_port, upstream_request,
+            )
+        else:
+            response = forward_request(
+                resolved_host, resolved_port, upstream_request,
+            )
         conn.sendall(_force_response_close(response))
     except HTTPError as exc:
         _send_error(conn, exc.status_code, exc.reason, exc.message)

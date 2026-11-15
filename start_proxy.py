@@ -23,6 +23,7 @@ from the proxy configuration and starts the proxy daemon.
 
 Supported directives inside a host block:
 - proxy_pass http://host:port;
+- proxy_transport standard | session;
 - proxy_set_header HeaderName value;
 - dist_policy round-robin | least-conn | random;
 """
@@ -33,7 +34,9 @@ import re
 import sys
 
 from daemon import create_proxy
+from daemon import config
 from daemon.proxy import parse_backend_address
+from start_backend import setup_rst_block
 
 PROXY_PORT = 8080
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -119,23 +122,22 @@ def parse_virtual_hosts(config_file):
             policy_match.group(1) if policy_match else "round-robin"
         )
 
+        transport_match = re.search(r"proxy_transport\s+([^\s;]+)\s*;", block)
+        transport = transport_match.group(1) if transport_match else None
+        if transport is not None and transport not in ("standard", "session"):
+            raise ValueError("invalid proxy_transport for host {!r}".format(host))
+
         existing = routes.get(host)
-        if existing is None:
-            routes[host] = (
-                targets[0] if len(targets) == 1 else targets,
-                policy,
-                headers,
-            )
-        else:
-            old_targets, old_policy, old_headers = existing
-            combined = _target_list(old_targets) + targets
-            combined = list(dict.fromkeys(combined))
+        if existing is not None:
+            old_targets, _, old_headers = existing[:3]
+            targets = list(dict.fromkeys(_target_list(old_targets) + targets))
             old_headers.update(headers)
-            routes[host] = (
-                combined[0] if len(combined) == 1 else combined,
-                policy or old_policy,
-                old_headers,
-            )
+            headers = old_headers
+            if transport is None and len(existing) > 3:
+                transport = existing[3]
+
+        route = (targets[0] if len(targets) == 1 else targets, policy, headers)
+        routes[host] = route + (transport,) if transport else route
 
     return routes
 
@@ -155,6 +157,9 @@ def main(argv=None):
         routes = parse_virtual_hosts(args.config)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
+
+    if any(len(route) > 3 and route[3] == "session" for route in routes.values()):
+        setup_rst_block(args.server_ip, config.PROXY_RAW_PORT)
 
     create_proxy(args.server_ip, args.server_port, routes)
     return 0

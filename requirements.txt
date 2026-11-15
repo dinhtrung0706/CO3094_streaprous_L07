@@ -1,2 +1,3 @@
 # Required by the raw-socket transport.
 netifaces>=0.11
+cryptography==2.6.1
