@@ -2,7 +2,7 @@
 Provide a socket-free Connection implementation for transport tests.
 """
 
-import collections
+import queue
 import sys
 from types import ModuleType
 from unittest.mock import patch
@@ -28,7 +28,7 @@ class FakeConnection(Connection):
             cwnd=cwnd, rwnd=rwnd, handshake_rtt=0.1,
         )
         self.sent = []
-        self.received = collections.deque()
+        self.received = queue.Queue()
         self.handlers = set()
 
     def register_disconnect_handler(self, handler):
@@ -42,4 +42,8 @@ class FakeConnection(Connection):
         return len(payload)
 
     def recv_data_segment(self):
-        return self.received.popleft()
+        return self.received.get()
+
+    def stop_receive(self):
+        self._receive_stop.set()
+        self.received.put(b"")

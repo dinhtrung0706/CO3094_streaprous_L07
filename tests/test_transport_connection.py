@@ -36,7 +36,7 @@ class TestConnection(unittest.TestCase):
     @patch("transport.connection.run_conn_recv", return_value=b"message")
     def test_receive_delegates_to_raw_connection(self, recv):
         self.assertEqual(self.conn.recv_data_segment(), b"message")
-        recv.assert_called_once_with(self.conn._socket, self.conn._conn_info)
+        recv.assert_called_once_with(self.conn._socket, self.conn._conn_info, self.conn._receive_stop)
 
     @patch("transport.connection.run_conn_recv", return_value=b"")
     def test_receive_connection_loss(self, recv):

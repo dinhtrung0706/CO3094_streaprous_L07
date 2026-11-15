@@ -69,16 +69,13 @@ class TestSession(unittest.TestCase):
         self.assertFalse(partial.exists())
 
     def test_delayed_ack_milestone(self):
-        self.conn.received.append(data_packet(7, 0, b"A" * 1200).encode())
-        self.conn.received.append(data_packet(7, 1, b"B" * 1200).encode())
-        self.session.receive_packet()
+        self.session._process_received_packet(data_packet(7, 0, b"A" * 1200))
         self.assertFalse(any(p.flags == ACK for p in self.conn.sent))
-        self.session.receive_packet()
+        self.session._process_received_packet(data_packet(7, 1, b"B" * 1200))
         self.assertTrue(any(p.flags == ACK for p in self.conn.sent))
 
     def test_delayed_ack_deadline(self):
-        self.conn.received.append(data_packet(11, 0, b"x").encode())
-        self.session.receive_packet()
+        self.session._process_received_packet(data_packet(11, 0, b"x"))
         self.assertFalse(self.conn.sent)
         self.session._send_delayed_acks()
         self.assertTrue(any(p.flags == ACK for p in self.conn.sent))
