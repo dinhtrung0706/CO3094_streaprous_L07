@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.backends import default_backend
 
 from .constant import SESSION_KDF_INFO
 
@@ -45,7 +46,7 @@ def derive_cipher(private_key, peer_public_key):
     """
     public_key = X25519PublicKey.from_public_bytes(peer_public_key)
     shared_secret = private_key.exchange(public_key)
-    key = HKDF(hashes.SHA256(), 32, None, SESSION_KDF_INFO).derive(shared_secret)
+    key = HKDF(hashes.SHA256(), 32, None, SESSION_KDF_INFO, backend=default_backend()).derive(shared_secret)
     return AESGCM(key)
 
 
