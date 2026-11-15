@@ -127,7 +127,7 @@ def setup_rst_block(ip, port):
         ], check=False)  # Ignore errors if table doesn't exist
         subprocess.run([
             "pfctl", "-a", "com.apple/250.RawSocketBlock", "-f", "-"
-        ], input=f"block drop out proto tcp from any to any port {port} flags R/R\n".encode(), check=False)
+        ], input=f"block drop out quick proto tcp from any port {port} to any flags R/R\n".encode(), check=False)
     else:
         subprocess.run([
             "iptables",
