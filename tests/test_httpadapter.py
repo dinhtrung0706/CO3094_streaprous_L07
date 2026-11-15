@@ -84,9 +84,7 @@ def parse_responses(payload):
 
 def call_adapter(routes, raw, timeout=3.0):
     server, client = socket.socketpair()
-    adapter = HttpAdapter(
-        "127.0.0.1", 9000, server, ("127.0.0.1", 1), routes
-    )
+    adapter = HttpAdapter("127.0.0.1", 9000, server, ("127.0.0.1", 1), routes)
     thread = threading.Thread(
         target=adapter.handle_client,
         args=(server, ("127.0.0.1", 1), routes),
@@ -103,7 +101,7 @@ def call_adapter(routes, raw, timeout=3.0):
     while True:
         try:
             chunk = client.recv(65536)
-        except (TimeoutError, socket.timeout):
+        except (socket.timeout, socket.timeout):
             break
         if not chunk:
             break
@@ -278,9 +276,7 @@ class DispatchTests(unittest.TestCase):
     def test_kwargs_handler(self):
         handler = lambda **kwargs: {"keys": sorted(kwargs)}
         routes = {("POST", "/users/<int:user_id>"): handler}
-        request = make_request(
-            "/users/42", "POST", body=b"x", routes=routes
-        )
+        request = make_request("/users/42", "POST", body=b"x", routes=routes)
         response = self.adapter.dispatch(request)
         payload = response.build_response(request)
         _headers, body = split_response(payload)
@@ -330,9 +326,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(status_of(headers), "HTTP/1.1 400 Bad Request")
 
     def test_handler_runtime_error_is_500(self):
-        payload = self.adapter._error_payload(
-            make_request("/x"), RuntimeError("boom")
-        )
+        payload = self.adapter._error_payload(make_request("/x"), RuntimeError("boom"))
         headers, body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 500 Internal Server Error")
         self.assertNotIn(b"boom", body)
@@ -348,9 +342,7 @@ class DispatchTests(unittest.TestCase):
 
     def test_error_payload_401_has_challenge(self):
         request = make_request("/secure")
-        payload = self.adapter._error_payload(
-            request, Unauthorized("auth required")
-        )
+        payload = self.adapter._error_payload(request, Unauthorized("auth required"))
         headers, _body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 401 Unauthorized")
         self.assertIn("StreapRous", header_value(headers, "WWW-Authenticate"))
@@ -398,9 +390,7 @@ class DispatchTests(unittest.TestCase):
         handler = lambda request: object()
         routes = {("GET", "/x"): handler}
         request = make_request("/x", routes=routes)
-        payload = self.adapter._error_payload(
-            request, RuntimeError("unsupported")
-        )
+        payload = self.adapter._error_payload(request, RuntimeError("unsupported"))
         headers, _body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 500 Internal Server Error")
 
@@ -442,13 +432,9 @@ class SocketTransportTests(unittest.TestCase):
 
     def test_path_parameter_route(self):
         routes = {
-            ("GET", "/users/<int:user_id>"): lambda request, user_id: {
-                "id": user_id
-            }
+            ("GET", "/users/<int:user_id>"): lambda request, user_id: {"id": user_id}
         }
-        payload = call_adapter(
-            routes, b"GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(routes, b"GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
         _headers, body = split_response(payload)
         self.assertEqual(json.loads(body.decode("utf-8")), {"id": 42})
 
@@ -497,9 +483,7 @@ class SocketTransportTests(unittest.TestCase):
 
     def test_method_not_allowed(self):
         routes = {("POST", "/hello"): lambda request: "ok"}
-        payload = call_adapter(
-            routes, b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(routes, b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
         headers, _body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 405 Method Not Allowed")
         self.assertEqual(header_value(headers, "Allow"), "POST")
@@ -508,9 +492,7 @@ class SocketTransportTests(unittest.TestCase):
         handler = lambda request: {"ok": True}
         handler._route_auth = True
         routes = {("GET", "/secure"): handler}
-        payload = call_adapter(
-            routes, b"GET /secure HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(routes, b"GET /secure HTTP/1.1\r\nHost: x\r\n\r\n")
         headers, _body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 401 Unauthorized")
         self.assertIn("StreapRous", header_value(headers, "WWW-Authenticate"))
@@ -520,9 +502,7 @@ class SocketTransportTests(unittest.TestCase):
             raise RuntimeError("boom")
 
         routes = {("GET", "/boom"): handler}
-        payload = call_adapter(
-            routes, b"GET /boom HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(routes, b"GET /boom HTTP/1.1\r\nHost: x\r\n\r\n")
         headers, body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 500 Internal Server Error")
         self.assertNotIn(b"RuntimeError", body)
@@ -580,9 +560,7 @@ class SocketTransportTests(unittest.TestCase):
             ),
         )
         headers, _body = split_response(payload)
-        self.assertEqual(
-            status_of(headers), "HTTP/1.1 415 Unsupported Media Type"
-        )
+        self.assertEqual(status_of(headers), "HTTP/1.1 415 Unsupported Media Type")
 
     def test_head_static_has_no_body(self):
         payload = call_adapter(
@@ -751,11 +729,13 @@ class RawTransportTests(unittest.TestCase):
 
         routes = {("GET", "/hello"): lambda request: {"ok": True}}
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, routes)
-        with patch("daemon.httpadapter.run_conn_recv", recv), patch(
-            "daemon.httpadapter.run_conn_send", send
-        ), patch(
-            "daemon.httpadapter.close_connection",
-            lambda _socket, _info: closed.append(True),
+        with (
+            patch("daemon.httpadapter.run_conn_recv", recv),
+            patch("daemon.httpadapter.run_conn_send", send),
+            patch(
+                "daemon.httpadapter.close_connection",
+                lambda _socket, _info: closed.append(True),
+            ),
         ):
             adapter.handle_client_raw(object(), self.conn_info, routes)
         self.assertTrue(closed)
@@ -777,9 +757,11 @@ class RawTransportTests(unittest.TestCase):
             return len(payload)
 
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
-        with patch("daemon.httpadapter.run_conn_recv", recv), patch(
-            "daemon.httpadapter.run_conn_send", send
-        ), patch("daemon.httpadapter.close_connection", lambda *_: None):
+        with (
+            patch("daemon.httpadapter.run_conn_recv", recv),
+            patch("daemon.httpadapter.run_conn_send", send),
+            patch("daemon.httpadapter.close_connection", lambda *_: None),
+        ):
             adapter.handle_client_raw(object(), self.conn_info, {})
         headers, _body = split_response(sent[-1])
         self.assertEqual(status_of(headers), "HTTP/1.1 400 Bad Request")
@@ -796,11 +778,13 @@ class RawTransportTests(unittest.TestCase):
             return len(payload)
 
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
-        with patch("daemon.httpadapter.run_conn_recv", recv), patch(
-            "daemon.httpadapter.run_conn_send", send
-        ), patch(
-            "daemon.httpadapter.close_connection",
-            lambda *_: closed.append(True),
+        with (
+            patch("daemon.httpadapter.run_conn_recv", recv),
+            patch("daemon.httpadapter.run_conn_send", send),
+            patch(
+                "daemon.httpadapter.close_connection",
+                lambda *_: closed.append(True),
+            ),
         ):
             adapter.handle_client_raw(object(), self.conn_info, {})
         self.assertEqual(sent, [])
@@ -812,9 +796,7 @@ class AsyncTransportTests(unittest.TestCase):
         async def run():
             adapter = HttpAdapter(None, None, None, None, routes)
             server = await asyncio.start_server(
-                lambda reader, writer: adapter.handle_client_coroutine(
-                    reader, writer
-                ),
+                lambda reader, writer: adapter.handle_client_coroutine(reader, writer),
                 "127.0.0.1",
                 0,
             )
@@ -950,9 +932,7 @@ class RouterIntegrationTests(unittest.TestCase):
         def hello(request):
             return {"ok": True}
 
-        payload = call_adapter(
-            app.routes, b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(app.routes, b"GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
         _headers, body = split_response(payload)
         self.assertEqual(json.loads(body.decode("utf-8")), {"ok": True})
 
@@ -963,9 +943,7 @@ class RouterIntegrationTests(unittest.TestCase):
         def secure(request):
             return {"ok": True}
 
-        payload = call_adapter(
-            app.routes, b"GET /secure HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(app.routes, b"GET /secure HTTP/1.1\r\nHost: x\r\n\r\n")
         headers, _body = split_response(payload)
         self.assertEqual(status_of(headers), "HTTP/1.1 401 Unauthorized")
 
@@ -976,9 +954,7 @@ class RouterIntegrationTests(unittest.TestCase):
         async def async_route(request):
             return {"async": True}
 
-        payload = call_adapter(
-            app.routes, b"GET /async HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(app.routes, b"GET /async HTTP/1.1\r\nHost: x\r\n\r\n")
         _headers, body = split_response(payload)
         self.assertEqual(json.loads(body.decode("utf-8")), {"async": True})
 
@@ -989,9 +965,7 @@ class RouterIntegrationTests(unittest.TestCase):
         def user(request, user_id):
             return {"id": user_id}
 
-        payload = call_adapter(
-            app.routes, b"GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n"
-        )
+        payload = call_adapter(app.routes, b"GET /users/42 HTTP/1.1\r\nHost: x\r\n\r\n")
         _headers, body = split_response(payload)
         self.assertEqual(json.loads(body.decode("utf-8")), {"id": 42})
 
@@ -1022,9 +996,7 @@ class CompatibilityTests(unittest.TestCase):
         adapter = HttpAdapter("127.0.0.1", 9000, None, None, {})
         self.assertEqual(adapter.build_proxy_headers(""), {})
         self.assertEqual(adapter.build_proxy_headers("http://proxy:8080"), {})
-        headers = adapter.build_proxy_headers(
-            "http://user1:password@proxy:8080"
-        )
+        headers = adapter.build_proxy_headers("http://user1:password@proxy:8080")
         self.assertEqual(
             headers,
             {"Proxy-Authorization": "Basic dXNlcjE6cGFzc3dvcmQ="},
@@ -1073,7 +1045,7 @@ class CompatibilityTests(unittest.TestCase):
             while True:
                 try:
                     chunk = client.recv(65536)
-                except (TimeoutError, socket.timeout):
+                except (socket.timeout, socket.timeout):
                     break
                 if not chunk:
                     break

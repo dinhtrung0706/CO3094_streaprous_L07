@@ -315,9 +315,7 @@ def forward_request(
     connect_timeout = (
         PROXY_CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
     )
-    read_timeout = (
-        PROXY_BACKEND_TIMEOUT if read_timeout is None else read_timeout
-    )
+    read_timeout = PROXY_BACKEND_TIMEOUT if read_timeout is None else read_timeout
     payload = _force_request_close(request)
     backend = None
     chunks = []
@@ -326,7 +324,7 @@ def forward_request(
             backend = socket.create_connection(
                 (host, int(port)), timeout=connect_timeout
             )
-        except TimeoutError:
+        except socket.timeout:
             raise GatewayTimeout("backend connect timed out")
         except OSError as exc:
             raise BadGateway(f"backend connection failed: {exc}")
@@ -334,7 +332,7 @@ def forward_request(
         backend.settimeout(read_timeout)
         try:
             backend.sendall(payload)
-        except TimeoutError:
+        except socket.timeout:
             raise GatewayTimeout("backend send timed out")
         except OSError as exc:
             raise BadGateway(f"backend send failed: {exc}")
@@ -342,7 +340,7 @@ def forward_request(
         while True:
             try:
                 chunk = backend.recv(65536)
-            except TimeoutError:
+            except socket.timeout:
                 raise GatewayTimeout("backend response timed out")
             except OSError as exc:
                 raise BadGateway(f"backend receive failed: {exc}")
@@ -384,9 +382,7 @@ def build_upstream_request(request, set_headers, hostname, client_ip):
     version = request.version or "HTTP/1.1"
     target = request.target or request.path or "/"
     headers = []
-    configured_host = any(
-        str(name).lower() == "host" for name in set_headers
-    )
+    configured_host = any(str(name).lower() == "host" for name in set_headers)
     for name, value in request.headers.items():
         lowered = name.lower()
         if lowered in _HOP_BY_HOP or lowered == "content-length":
@@ -415,9 +411,7 @@ def build_upstream_request(request, set_headers, hostname, client_ip):
         headers.append(("Host", request.headers.get("Host", hostname)))
 
     forwarded_for = [
-        value
-        for name, value in headers
-        if name.lower() == "x-forwarded-for"
+        value for name, value in headers if name.lower() == "x-forwarded-for"
     ]
     headers = [
         (name, value)
@@ -430,9 +424,7 @@ def build_upstream_request(request, set_headers, hostname, client_ip):
     else:
         chain = client_ip
     headers.append(("X-Forwarded-For", chain))
-    headers.append(
-        ("X-Forwarded-Host", request.headers.get("Host", hostname))
-    )
+    headers.append(("X-Forwarded-Host", request.headers.get("Host", hostname)))
     headers.append(("X-Forwarded-Proto", "http"))
     headers.append(("Content-Length", str(len(body))))
     headers.append(("Connection", "close"))
@@ -493,9 +485,7 @@ def handle_client(ip, port, conn, addr, routes):
             )
             return
 
-        resolved_host, resolved_port = resolve_routing_policy(
-            host_header, routes
-        )
+        resolved_host, resolved_port = resolve_routing_policy(host_header, routes)
         if resolved_host is None:
             _send_error(
                 conn,
@@ -522,7 +512,7 @@ def handle_client(ip, port, conn, addr, routes):
         conn.sendall(_force_response_close(response))
     except HTTPError as exc:
         _send_error(conn, exc.status_code, exc.reason, exc.message)
-    except TimeoutError:
+    except socket.timeout:
         _send_error(
             conn,
             408,

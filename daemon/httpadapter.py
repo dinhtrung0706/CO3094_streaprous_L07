@@ -156,7 +156,7 @@ class HttpAdapter:
                         reader,
                         lambda: conn.sendall(_CONTINUE_RESPONSE),
                     )
-                except TimeoutError:
+                except socket.timeout:
                     if reader.started or reader.buffer:
                         self._safe_send(
                             conn,
@@ -172,9 +172,7 @@ class HttpAdapter:
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     break
                 except Exception as exc:
-                    logger.exception(
-                        "Unhandled request read error from %r", addr
-                    )
+                    logger.exception("Unhandled request read error from %r", addr)
                     self._safe_send(conn, self._error_payload(None, exc))
                     break
 
@@ -186,9 +184,7 @@ class HttpAdapter:
                     response = self.dispatch(request)
                     payload = response.build_response(request)
                 except HTTPError as exc:
-                    self._safe_send(
-                        conn, self._error_payload(request, exc)
-                    )
+                    self._safe_send(conn, self._error_payload(request, exc))
                     break
                 except (ConnectionResetError, BrokenPipeError):
                     break
@@ -198,9 +194,7 @@ class HttpAdapter:
                         request.method,
                         request.path,
                     )
-                    self._safe_send(
-                        conn, self._error_payload(request, exc)
-                    )
+                    self._safe_send(conn, self._error_payload(request, exc))
                     break
 
                 self.response = response
@@ -213,10 +207,7 @@ class HttpAdapter:
                     break
                 if response.keep_alive is False:
                     break
-                if (
-                    response.status_code is not None
-                    and response.status_code >= 400
-                ):
+                if response.status_code is not None and response.status_code >= 400:
                     break
                 try:
                     conn.settimeout(config.KEEP_ALIVE_TIMEOUT)
@@ -230,9 +221,7 @@ class HttpAdapter:
 
     def read_request(self, reader, send_continue=None):
         """Read and parse one complete HTTP message from a reader."""
-        head, found = reader.read_until(
-            b"\r\n\r\n", config.MAX_HEADER_BYTES
-        )
+        head, found = reader.read_until(b"\r\n\r\n", config.MAX_HEADER_BYTES)
         if not found:
             return None
         if len(head) > config.MAX_HEADER_BYTES:
@@ -264,22 +253,16 @@ class HttpAdapter:
         self.routes = routes if routes is not None else {}
         self.connaddr = (conn_info.client_ip, conn_info.client_port)
 
-        reader = _BufferedReader(
-            lambda: run_conn_recv(raw_socket, conn_info)
-        )
+        reader = _BufferedReader(lambda: run_conn_recv(raw_socket, conn_info))
         response = None
         try:
             try:
                 request = self.read_request(
                     reader,
-                    lambda: run_conn_send(
-                        raw_socket, conn_info, _CONTINUE_RESPONSE
-                    ),
+                    lambda: run_conn_send(raw_socket, conn_info, _CONTINUE_RESPONSE),
                 )
             except HTTPError as exc:
-                run_conn_send(
-                    raw_socket, conn_info, self._error_payload(None, exc)
-                )
+                run_conn_send(raw_socket, conn_info, self._error_payload(None, exc))
                 return
             except Exception as exc:
                 logger.exception("Unhandled raw request read error")
@@ -326,27 +309,19 @@ class HttpAdapter:
                 try:
                     request = await self.read_request_async(reader, writer)
                 except HTTPError as exc:
-                    await self._send_async(
-                        writer, self._error_payload(None, exc)
-                    )
+                    await self._send_async(writer, self._error_payload(None, exc))
                     break
                 except asyncio.TimeoutError:
                     await self._send_async(
                         writer,
-                        self._error_payload(
-                            None, RequestTimeout("Request timed out")
-                        ),
+                        self._error_payload(None, RequestTimeout("Request timed out")),
                     )
                     break
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     break
                 except Exception as exc:
-                    logger.exception(
-                        "Unhandled async request read error from %r", addr
-                    )
-                    await self._send_async(
-                        writer, self._error_payload(None, exc)
-                    )
+                    logger.exception("Unhandled async request read error from %r", addr)
+                    await self._send_async(writer, self._error_payload(None, exc))
                     break
 
                 if request is None:
@@ -357,9 +332,7 @@ class HttpAdapter:
                     response = await self.dispatch_async(request)
                     payload = response.build_response(request)
                 except HTTPError as exc:
-                    await self._send_async(
-                        writer, self._error_payload(request, exc)
-                    )
+                    await self._send_async(writer, self._error_payload(request, exc))
                     break
                 except (ConnectionResetError, BrokenPipeError):
                     break
@@ -369,9 +342,7 @@ class HttpAdapter:
                         request.method,
                         request.path,
                     )
-                    await self._send_async(
-                        writer, self._error_payload(request, exc)
-                    )
+                    await self._send_async(writer, self._error_payload(request, exc))
                     break
 
                 self.response = response
@@ -385,10 +356,7 @@ class HttpAdapter:
                     break
                 if response.keep_alive is False:
                     break
-                if (
-                    response.status_code is not None
-                    and response.status_code >= 400
-                ):
+                if response.status_code is not None and response.status_code >= 400:
                     break
         finally:
             try:
@@ -620,7 +588,8 @@ class HttpAdapter:
         positional = [
             parameter
             for parameter in parameters.values()
-            if parameter.kind in (
+            if parameter.kind
+            in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             )
@@ -744,9 +713,7 @@ class HttpAdapter:
     @staticmethod
     def _expects_continue(headers):
         value = headers.get("Expect", "")
-        tokens = {
-            token.strip().lower() for token in value.split(",") if token.strip()
-        }
+        tokens = {token.strip().lower() for token in value.split(",") if token.strip()}
         return "100-continue" in tokens
 
     @staticmethod
@@ -765,9 +732,7 @@ class HttpAdapter:
         if value is None:
             return None
         codings = [
-            coding.strip().lower()
-            for coding in value.split(",")
-            if coding.strip()
+            coding.strip().lower() for coding in value.split(",") if coding.strip()
         ]
         if codings != ["chunked"]:
             raise UnsupportedMediaType("Unsupported Transfer-Encoding")
@@ -952,9 +917,7 @@ class HttpAdapter:
             status = 400
             reason = "Bad Request"
             headers = {}
-        elif isinstance(
-            exc, (TimeoutError, asyncio.TimeoutError, socket.timeout)
-        ):
+        elif isinstance(exc, (socket.timeout, asyncio.TimeoutError, socket.timeout)):
             status = 408
             reason = "Request Timeout"
             headers = {}
@@ -968,9 +931,7 @@ class HttpAdapter:
         for name, value in headers.items():
             response.set_header(name, value)
         if status == 401 and "WWW-Authenticate" not in response.headers:
-            response.add_header(
-                "WWW-Authenticate", 'Basic realm="StreapRous"'
-            )
+            response.add_header("WWW-Authenticate", 'Basic realm="StreapRous"')
             auth = getattr(self.routes, "auth_service", None)
             if auth is not None:
                 response.add_header("WWW-Authenticate", auth.digest_challenge())
@@ -1045,9 +1006,7 @@ class HttpAdapter:
 
         username, password = get_auth_from_url(proxy)
         if username:
-            token = base64.b64encode(
-                f"{username}:{password}".encode()
-            ).decode("ascii")
+            token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
             headers["Proxy-Authorization"] = f"Basic {token}"
 
         return headers
