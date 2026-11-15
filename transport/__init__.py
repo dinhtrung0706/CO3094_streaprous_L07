@@ -14,7 +14,7 @@ from .connection_interface import ConnectionInterface
 from .connection import Connection
 from .constant import (
     ACK_MILESTONE_BYTES,
-    ACK_RANGE_COUNT_SIZE,
+    ACK_RANGE_ENCODED_SIZE,
     HALF_LSEQ,
     HEARTBEAT_INTERVAL,
     HEARTBEAT_TIMEOUT,
@@ -48,6 +48,7 @@ from .packet import (
     EOM,
     HEADER_FORMAT,
     HEADER_SIZE,
+    HELLO,
     Packet,
     parse_buffer,
     PROBE,
@@ -65,7 +66,7 @@ from .transmitter import Transmitter
 __all__ = [
     "ACK",
     "ACK_MILESTONE_BYTES",
-    "ACK_RANGE_COUNT_SIZE",
+    "ACK_RANGE_ENCODED_SIZE",
     "ACKTracker",
     "CControl",
     "Connection",
@@ -81,6 +82,7 @@ __all__ = [
     "HEARTBEAT_TIMEOUT",
     "HEADER_FORMAT",
     "HEADER_SIZE",
+    "HELLO",
     "lseq_distance",
     "lseq_next",
     "lseq_range",

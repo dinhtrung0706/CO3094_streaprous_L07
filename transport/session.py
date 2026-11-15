@@ -10,6 +10,10 @@ from typing import Optional, Tuple, Union
 
 from .ack_track import ACKTracker, lseq_next, lseq_range
 from .congestion_control import CControl
+from .crypto import (
+    GCM_OVERHEAD, decrypt_payload, derive_cipher, encrypt_payload,
+    generate_key_pair,
+)
 from .connection_interface import ConnectionInterface
 from .constant import (
     PK_ILANE, PK_ITRANSID, PK_ILSEQ, MAX_RECEIVE_BUFFER, MAX_SEGMENT_SIZE,
@@ -19,11 +23,26 @@ from .constant import (
 )
 from .flow_control import FControl
 from .packet import (
-    ACK, CONTROL, DATA, EOM, HEADER_SIZE, PROBE, PING, PONG, TRANSFER,
+    ACK, CONTROL, DATA, EOM, HEADER_SIZE, HELLO, PROBE, PING, PONG, TRANSFER,
     VERSION, Packet, decode_ack_ranges, encode_ack_ranges,
 )
 from .stream_buffer import ReceiveBuffer, SendBuffer
 from .transmitter import Transmitter
+
+
+def _packet_kind(flags):
+    """Name a packet operation for diagnostics."""
+    if flags & DATA:
+        return "DATA"
+    if flags & ACK:
+        return "ACK"
+    if flags == PING:
+        return "PING"
+    if flags == PONG:
+        return "PONG"
+    if flags == HELLO:
+        return "HELLO"
+    return "PROBE"
 
 
 class Session:
@@ -81,6 +100,11 @@ class Session:
         self._aborted = False
         self._closed_event = threading.Event()
 
+        # Session key exchange
+        self._private_key, public_key = generate_key_pair()
+        self._cipher = None
+        self._crypto_ready = threading.Event()
+
         # Probing (Ping for rwnd when previous rwnd = 0)
         self._probe_event = threading.Event()
         self._probe_thread = None
@@ -106,6 +130,11 @@ class Session:
         # Start necessary thread
         self._transmitter.start_thread_deadline(self)
         conn.register_disconnect_handler(self.abort)
+        hello = Packet(
+            VERSION, CONTROL, HELLO, 0, 0, 0,
+            self._receive_window(), public_key
+        )
+        self.send_packet(hello)
         self._receiver_thread.start()
         self._heartbeat_thread.start()
         if self._fcontrol.rwnd == 0 and not self._aborted:
@@ -210,6 +239,35 @@ class Session:
             return trackers[TRANSFER].setdefault(transfer_id, ACKTracker())
         return trackers[TRANSFER].get(transfer_id)
 
+    def _encrypted_payload(self, packet):
+        """Identify packets requiring payload encryption."""
+        return packet.flags != HELLO and bool(packet.flags & DATA or packet.payload)
+
+    def _packet_size(self, packet):
+        """Calculate packet size including encryption overhead."""
+        size = HEADER_SIZE + len(packet.payload)
+        if self._encrypted_payload(packet):
+            size += GCM_OVERHEAD
+        return size
+
+    def _encode_packet(self, packet):
+        """Encrypt payloads before transmission."""
+        if not self._encrypted_payload(packet):
+            return packet.encode()
+        payload = encrypt_payload(self._cipher, packet.payload)
+        encrypted = Packet(
+            packet.version, packet.lane, packet.flags,
+            packet.logical_seq, packet.ack_seq, packet.packet_seq,
+            packet.rwnd, payload
+        )
+        return encrypted.encode()
+
+    def _decrypt_packet(self, packet):
+        """Decrypt payloads before dispatch."""
+        if self._encrypted_payload(packet):
+            packet.payload = decrypt_payload(self._cipher, packet.payload)
+        return packet
+
     def send_packet(self, packet: Packet) -> bool:
         """
         Reserve DATA capacity before transmitting a packet.
@@ -221,6 +279,9 @@ class Session:
             True if accepted; False if rejected or CONTROL send fails.
         """
         is_data = bool(packet.flags & DATA)
+        if packet.flags != HELLO and not self._crypto_ready.wait(5.0):
+            print("[Session] Warning: Key exchange timed out")
+            return False
 
         with self._ack_condition:
             if not self._guard_active():
@@ -236,7 +297,7 @@ class Session:
                     delay = self._next_data_send - time.monotonic()
 
             packet.packet_seq = self._next_packet_seq
-            encoded = packet.encode()
+            encoded = self._encode_packet(packet)
             packet_size = len(encoded)
 
             if is_data:
@@ -277,9 +338,7 @@ class Session:
                 pacing_interval = self._transmitter.pacing_time_before_send(nr_packets)
                 self._next_data_send = time.monotonic() + pacing_interval
 
-            kind = ("DATA" if is_data else "ACK" if packet.flags & ACK
-                    else "PING" if packet.flags == PING
-                    else "PONG" if packet.flags == PONG else "PROBE")
+            kind = _packet_kind(packet.flags)
             transfer_id = (self._transfer_id(packet)
                            if packet.lane == TRANSFER and packet.flags & (DATA | ACK)
                            else None)
@@ -344,7 +403,7 @@ class Session:
                 return False
 
             packet.packet_seq = self._next_packet_seq
-            encoded = packet.encode()
+            encoded = self._encode_packet(packet)
             self._next_packet_seq = (self._next_packet_seq + 1) & MASK_PSEQ
             try:
                 bytes_sent = self._conn.send_data_segment(encoded)
@@ -506,7 +565,7 @@ class Session:
                         or tracker.is_cumulatively_acked(key[PK_ILSEQ])):
                     continue
 
-                congestion_bytes += HEADER_SIZE + len(pending.payload)
+                congestion_bytes += self._packet_size(pending)
                 if packet.lane == TRANSFER:
                     flow_bytes += len(pending.payload) - TRANSFER_ID_SIZE
                 self._transmitter.acking_packet(key)
@@ -540,7 +599,7 @@ class Session:
                     continue
 
                 print(f"[Session] Warning: Packet exhausted retries: {key}")
-                congestion_bytes += HEADER_SIZE + len(packet.payload)
+                congestion_bytes += self._packet_size(packet)
 
             if congestion_bytes:
                 self._ccontrol.account_drop(congestion_bytes)
@@ -918,6 +977,7 @@ class Session:
 
         # Stop PING/PONG and probing threads.
         self._heartbeat_stop.set()
+        self._crypto_ready.set()
         self._heartbeat_activity.set()
         self._heartbeat_pong.set()
         self._conn.stop_receive()
@@ -960,7 +1020,7 @@ class Session:
                     print("[Session] Warning: Connection closed; aborting incomplete transfers")
                     break
 
-                packet = Packet.decode(data)
+                packet = self._decrypt_packet(Packet.decode(data))
                 self._last_received = time.monotonic()
                 self._heartbeat_activity.set()
                 self._process_received_packet(packet)
@@ -983,7 +1043,13 @@ class Session:
             packet: Decoded transport packet.
         """
         response = None
-        if packet.flags == PING:
+        if packet.flags == HELLO:
+            if self._cipher is None:
+                self._cipher = derive_cipher(self._private_key, packet.payload)
+                self._private_key = None
+                self._crypto_ready.set()
+                print("[Session] Key established")
+        elif packet.flags == PING:
             print("[Session] RX PING")
             with self._recv_lock:
                 rwnd = self._receive_window()

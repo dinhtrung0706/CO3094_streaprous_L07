@@ -6,7 +6,8 @@ import struct
 from typing import List, Tuple
 
 from .constant import (
-    ACK_RANGE_COUNT_SIZE, MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES, TRANSFER_ID_SIZE,
+    ACK_RANGE_ENCODED_SIZE, MASK_LSEQ, MASK_PSEQ, MAX_ACK_RANGES, TRANSFER_ID_SIZE,
+    X25519_PUBLIC_KEY_SIZE,
 )
 
 VERSION = 2
@@ -20,12 +21,13 @@ PROBE = 0x04
 EOM = 0x08
 PING = 0x10
 PONG = 0x20
+HELLO = 0x40
 
 HEADER_FORMAT = "!BBBBHHIHH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 VALID_LANES = (CONTROL, TRANSFER)
-VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE, PING, PONG)
+VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE, PING, PONG, HELLO)
 
 
 def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
@@ -64,10 +66,12 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
         raise ValueError("Window probes must have empty payloads")
     if flags in (PING, PONG) and (lane != CONTROL or payload_len):
         raise ValueError("PING/PONG require CONTROL lane and empty payload")
+    if flags == HELLO and (lane != CONTROL or payload_len != X25519_PUBLIC_KEY_SIZE):
+        raise ValueError("HELLO requires a 32-byte CONTROL payload")
     if lane == TRANSFER and flags & (DATA | ACK):
         required = TRANSFER_ID_SIZE
         if flags & ACK:
-            required += ACK_RANGE_COUNT_SIZE
+            required += ACK_RANGE_ENCODED_SIZE
         if payload_len < required:
             raise ValueError("TRANSFER packet is missing its identifier or ACK ranges")
 
