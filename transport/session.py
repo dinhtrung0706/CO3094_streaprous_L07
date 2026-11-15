@@ -79,6 +79,7 @@ class Session:
 
         # Abort or close session
         self._aborted = False
+        self._closed_event = threading.Event()
 
         # Probing (Ping for rwnd when previous rwnd = 0)
         self._probe_event = threading.Event()
@@ -878,6 +879,18 @@ class Session:
             raise self._receive_error
         return False
 
+    def wait_termination(self, timeout=None):
+        """
+        Wait for Session shutdown and cleanup.
+
+        Args:
+            timeout: Maximum waiting time in seconds.
+
+        Returns:
+            True if closed, False if timed out.
+        """
+        return self._closed_event.wait(timeout)
+
     def close_receive_files(self):
         """
         Close output files owned by this session.
@@ -931,6 +944,8 @@ class Session:
         with self._send_lock:
             self._pending_packets.clear()
             self._send_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
+
+        self._closed_event.set()
 
     def _receive_loop(self):
         """
