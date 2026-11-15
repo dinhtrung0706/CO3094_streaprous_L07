@@ -314,6 +314,63 @@ class HttpAdapter:
         finally:
             close_connection(raw_socket, conn_info)
 
+    def handle_client_session(self, raw_socket, conn_info, routes):
+        """Serve a raw-socket HTTP client using a transport Session."""
+        self.raw_socket = raw_socket
+        self.conn_info = conn_info
+        self.routes = routes if routes is not None else {}
+        self.connaddr = (conn_info.client_ip, conn_info.client_port)
+
+        from transport.connection import Connection
+        from transport.session import Session
+        from .session_http import (
+            REQUEST_ID, RESPONSE_ID, receive_message, send_message,
+        )
+
+        conn = Connection(
+            socket=raw_socket, **conn_info._asdict(),
+            cwnd=config.SESSION_CWND,
+            rwnd=config.SESSION_RWND, handshake_rtt=config.SESSION_RTT
+        )
+        session = Session(conn, max_retries=config.SESSION_MAX_RETRIES)
+        reader = _BufferedReader(lambda: receive_message(session, REQUEST_ID))
+        response = None
+        try:
+            try:
+                request = self.read_request(reader)
+            except HTTPError as exc:
+                send_message(session, self._error_payload(None, exc), RESPONSE_ID)
+                return
+            except Exception as exc:
+                logger.exception("Unhandled raw request read error")
+                send_message(session, self._error_payload(None, exc), RESPONSE_ID)
+                return
+
+            if request is None:
+                return
+            self.request = request
+
+            try:
+                response = self.dispatch(request)
+                response.keep_alive = False
+                payload = response.build_response(request)
+            except HTTPError as exc:
+                payload = self._error_payload(request, exc)
+            except Exception:
+                logger.exception(
+                    "Unhandled raw dispatch error for %s %s",
+                    request.method,
+                    request.path,
+                )
+                payload = self._error_payload(request, RuntimeError())
+
+            self.response = response
+            if payload:
+                send_message(session, payload, RESPONSE_ID)
+        finally:
+            session.abort()
+            close_connection(raw_socket, conn_info)
+
     # ------------------------------------------------------------------
     # Asyncio transport
     # ------------------------------------------------------------------

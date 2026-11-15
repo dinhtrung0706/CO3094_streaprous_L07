@@ -128,7 +128,7 @@ def handle_client_raw(server, conn_info, routes):
     daemon.raw_socket = server
     
     # Handle client using raw connection
-    daemon.handle_client_raw(server, conn_info, routes)
+    daemon.handle_client_session(server, conn_info, routes)
 
 
 # Coroutine async/await for handling new client

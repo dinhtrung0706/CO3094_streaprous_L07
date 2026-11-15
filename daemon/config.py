@@ -4,6 +4,9 @@ Tests may monkey-patch these module attributes to exercise limit paths without
 allocating huge buffers.
 """
 
+from transport.constant import MAX_RECEIVE_BUFFER, MAX_SEGMENT_SIZE
+
+
 MAX_HEADER_BYTES = 64 * 1024
 MAX_HEADERS = 100
 MAX_HEADER_LINE_BYTES = 8 * 1024
@@ -16,3 +19,8 @@ KEEP_ALIVE_TIMEOUT = 30.0
 MAX_KEEPALIVE_REQUESTS = 100
 SERVER_NAME = "StreapRous/1.0"
 DEFAULT_CHARSET = "utf-8"
+
+SESSION_CWND = 16 * MAX_SEGMENT_SIZE
+SESSION_RWND = MAX_RECEIVE_BUFFER
+SESSION_RTT = 0.1
+SESSION_MAX_RETRIES = 5
