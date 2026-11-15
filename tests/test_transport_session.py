@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from transport.constant import RECV_DUPLICATE, RECV_ERROR, RECV_STORED
-from transport.packet import ACK, DATA, EOM, TRANSFER, VERSION, Packet
+from transport.crypto import generate_key_pair
+from transport.packet import ACK, CONTROL, DATA, EOM, HELLO, TRANSFER, VERSION, Packet
 from transport.session import Session
 from transport.stream_buffer import SendBuffer
 from tests.transport_connection_fixture import FakeConnection
@@ -30,12 +31,16 @@ class TestSession(unittest.TestCase):
         self.addCleanup(timer.stop)
         self.session = Session(self.conn, 2, self.temp.name)
         self.addCleanup(self.session.abort)
+        _, public_key = generate_key_pair()
+        self.session._process_received_packet(Packet(VERSION, CONTROL, HELLO, 0, 0, 0, 65535, public_key))
+        self.conn.sent.clear()
 
     def test_send_and_reject_duplicate_pending(self):
         buffer = SendBuffer(b"hello")
         self.assertTrue(self.session.send_next_chunk(buffer, 42))
         self.assertIsNone(buffer.acquire_send_data())
-        self.assertEqual(self.conn.sent[-1].payload[4:], b"hello")
+        self.assertNotIn(b"hello", self.conn.sent[-1].payload)
+        self.assertEqual(self.session._decrypt_packet(self.conn.sent[-1]).payload[4:], b"hello")
         self.assertEqual(self.conn.sent[-1].flags, DATA | EOM)
         self.assertFalse(self.session.send_packet(data_packet(42, 0, b"hello")))
 
