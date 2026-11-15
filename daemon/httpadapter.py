@@ -1025,9 +1025,12 @@ class HttpAdapter:
         for name, value in headers.items():
             response.set_header(name, value)
         if status == 401 and "WWW-Authenticate" not in response.headers:
-            response.set_header(
+            response.add_header(
                 "WWW-Authenticate", 'Basic realm="StreapRous"'
             )
+            auth = getattr(self.routes, "auth_service", None)
+            if auth is not None:
+                response.add_header("WWW-Authenticate", auth.digest_challenge())
         response.keep_alive = False
         return response
 
@@ -1100,7 +1103,7 @@ class HttpAdapter:
         username, password = get_auth_from_url(proxy)
         if username:
             token = base64.b64encode(
-                f"{username}:{password}".encode("utf-8")
+                f"{username}:{password}".encode()
             ).decode("ascii")
             headers["Proxy-Authorization"] = f"Basic {token}"
 

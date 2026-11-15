@@ -62,7 +62,6 @@ from .dictionary import CaseInsensitiveDict
 from .httpadapter import HttpAdapter
 from .response import *
 
-
 sel = selectors.DefaultSelector()
 
 mode_async = "callback"

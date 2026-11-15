@@ -46,10 +46,10 @@ def frame_type_name(frame_type):
     """Return the symbolic name for a frame type, or ``"UNKNOWN"``."""
     return TYPE_NAMES.get(frame_type, "UNKNOWN")
 
-class Frame(object):
+class Frame:
     """One decoded protocol frame."""
 
-    __slots__ = ("type", "seq", "ack", "window", "payload")
+    __slots__ = ("ack", "payload", "seq", "type", "window")
 
     def __init__(self, type, seq=0, ack=0, window=DEFAULT_WINDOW, payload=b""):
         self.type = type
@@ -59,9 +59,7 @@ class Frame(object):
         self.payload = payload
 
     def __repr__(self):
-        return "Frame(type={!r}, seq={!r}, ack={!r}, window={!r}, payload={!r})".format(
-            self.type, self.seq, self.ack, self.window, self.payload
-        )
+        return f"Frame(type={self.type!r}, seq={self.seq!r}, ack={self.ack!r}, window={self.window!r}, payload={self.payload!r})"
 
     def __eq__(self, other):
         if not isinstance(other, Frame):
@@ -155,11 +153,13 @@ def message_envelope(
     body,
     message_id=None,
     recipient="*",
+    kind="channel",
     ts=None,
 ):
     """Build the JSON envelope carried by a ``MSG`` frame."""
     envelope = {
         "v": VERSION,
+        "kind": kind,
         "id": message_id or new_message_id(),
         "channel": channel,
         "from": sender,
@@ -214,9 +214,16 @@ def validate_envelope(value):
     if not isinstance(recipient, str) or not recipient:
         raise ProtocolError("envelope to must be a non-empty string")
 
+    kind = value.get("kind", "channel")
+    if kind not in ("channel", "direct", "invite"):
+        raise ProtocolError("envelope kind is unsupported")
     return {
         "id": message_id,
+        "kind": kind,
         "channel": channel,
+        "channel_name": value.get("channel_name"),
+        "is_private": bool(value.get("is_private", False)),
+        "owner": value.get("owner"),
         "from": sender,
         "to": recipient,
         "body": body,
@@ -269,7 +276,6 @@ __all__ = [
     "AUTH_ERR",
     "BYE",
     "DEFAULT_WINDOW",
-    "Frame",
     "HEADER",
     "HEADER_SIZE",
     "HELLO",
@@ -281,9 +287,10 @@ __all__ = [
     "MSG_ACK",
     "PING",
     "PONG",
-    "ProtocolError",
     "TYPE_NAMES",
     "VERSION",
+    "Frame",
+    "ProtocolError",
     "decode_frame",
     "decode_message",
     "encode_message",

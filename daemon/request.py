@@ -584,12 +584,16 @@ class Request:
         return cookies
 
     def parse_authorization(self):
-        """Decode a Basic Authorization header, or return None."""
+        """Decode Basic credentials or retain a Digest parameter mapping."""
         raw = self.headers.get("Authorization")
         if not raw:
             return None
         parts = raw.split(None, 1)
-        if len(parts) != 2 or parts[0].lower() != "basic":
+        if len(parts) != 2:
+            return None
+        if parts[0].lower() == "digest":
+            return {"scheme": "Digest", "value": parts[1]}
+        if parts[0].lower() != "basic":
             return None
         try:
             decoded = base64.b64decode(parts[1].strip(), validate=True)
