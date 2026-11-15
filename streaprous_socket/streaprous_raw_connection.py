@@ -774,7 +774,7 @@ def connect(s: socket.socket, local_ip: str, local_port: int,
     print(f"[Streap_raw] Warning: Connection to {peer_ip}:{peer_port} failed")
     return None
 
-def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
+def run_conn_recv(s: socket.socket, conn_info: conn_struct, stop_event=None) -> bytes:
     """
     Receive data on an established connection using raw sockets.
     This function handles incoming packets for a specific connection by reading
@@ -799,7 +799,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
     print(f"[Streap_raw] run_conn_recv: Starting receive loop for {client_ip}:{client_port} (waiting for data...)")
 
     try:
-        while True:
+        while stop_event is None or not stop_event.is_set():
             # Get packet from the dispatcher queue instead of reading directly from socket
             try:
                 packet, _addr = packet_queue.get(timeout=1.0)
@@ -918,6 +918,7 @@ def run_conn_recv(s: socket.socket, conn_info: conn_struct) -> bytes:
                             server_seq=pkt_ack,
                             last_activity=time.time()
                         )
+        return b""
 
     except KeyboardInterrupt:
         print("\n[Streap_raw] Receive loop interrupted.")
