@@ -1,8 +1,27 @@
-<html><body>
-<h1>Login</h1>
-<form method="POST" action="/login">
-  Username: <input name="username" type="text"><br>
-  Password: <input name="password" type="password"><br>
-  <input type="submit" value="Login">
-</form>
-</body></html>
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập | StreapRous Chat</title>
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <script src="/static/js/auth.js" defer></script>
+</head>
+<body class="auth-page" data-auth-page="login">
+  <main class="auth-card" aria-labelledby="authTitle">
+    <div class="auth-icon" aria-hidden="true">SR</div>
+    <p class="eyebrow">CO3094 · Hybrid Chat</p>
+    <h1 id="authTitle">Đăng nhập</h1>
+    <p class="subtle">Đăng nhập vào Peer Server của bạn để gửi và nhận tin nhắn.</p>
+    <p id="authStatus" class="status-line" role="status" aria-live="polite"></p>
+    <form id="authForm" autocomplete="on">
+      <label for="username">Tên tài khoản</label>
+      <input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" required autofocus placeholder="Ví dụ: alice">
+      <label for="password">Mật khẩu</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Nhập mật khẩu">
+      <button id="authSubmit" type="submit" class="button primary wide">Đăng nhập</button>
+    </form>
+    <p class="auth-switch">Chưa có tài khoản? <a href="/register.html">Đăng ký</a></p>
+  </main>
+</body>
+</html>
