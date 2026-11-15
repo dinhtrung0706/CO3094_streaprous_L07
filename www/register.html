@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng ký | StreapRous Chat</title>
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <script src="/static/js/auth.js" defer></script>
+</head>
+<body class="auth-page" data-auth-page="register">
+  <main class="auth-card" aria-labelledby="authTitle">
+    <div class="auth-icon" aria-hidden="true">SR</div>
+    <p class="eyebrow">CO3094 · Hybrid Chat</p>
+    <h1 id="authTitle">Tạo tài khoản</h1>
+    <p class="subtle">Username 3–32 ký tự (chữ, số, dấu chấm, gạch dưới, gạch ngang); mật khẩu tối thiểu 8 byte UTF-8.</p>
+    <p id="authStatus" class="status-line" role="status" aria-live="polite"></p>
+    <form id="authForm" autocomplete="on">
+      <label for="username">Tên tài khoản</label>
+      <input id="username" name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" title="3–32 ký tự: chữ, số, dấu chấm, gạch dưới, gạch ngang" required autofocus placeholder="Ví dụ: alice">
+      <label for="password">Mật khẩu</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required placeholder="Tối thiểu 8 ký tự ASCII (hoặc 8 byte UTF-8)">
+      <label for="confirmPassword">Xác nhận mật khẩu</label>
+      <input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password" required placeholder="Nhập lại mật khẩu">
+      <button id="authSubmit" type="submit" class="button primary wide">Tạo tài khoản</button>
+    </form>
+    <p class="auth-switch">Đã có tài khoản? <a href="/login.html">Đăng nhập</a></p>
+  </main>
+</body>
+</html>
