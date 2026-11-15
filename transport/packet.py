@@ -18,12 +18,14 @@ DATA = 0x01
 ACK = 0x02
 PROBE = 0x04
 EOM = 0x08
+PING = 0x10
+PONG = 0x20
 
 HEADER_FORMAT = "!BBBBHHIHH"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 VALID_LANES = (CONTROL, TRANSFER)
-VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE)
+VALID_FLAGS = (DATA, DATA | EOM, ACK, PROBE, ACK | PROBE, PING, PONG)
 
 
 def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwnd, payload_len):
@@ -60,6 +62,8 @@ def _validate_fields(version, lane, flags, logical_seq, ack_seq, packet_seq, rwn
             raise ValueError("Packet field out of range")
     if flags in (PROBE, ACK | PROBE) and payload_len:
         raise ValueError("Window probes must have empty payloads")
+    if flags in (PING, PONG) and (lane != CONTROL or payload_len):
+        raise ValueError("PING/PONG require CONTROL lane and empty payload")
     if lane == TRANSFER and flags & (DATA | ACK):
         required = TRANSFER_ID_SIZE
         if flags & ACK:

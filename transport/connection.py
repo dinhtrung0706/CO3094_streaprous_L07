@@ -2,6 +2,8 @@
 Provide raw TCP send and receive operations.
 """
 
+import threading
+
 from .connection_interface import ConnectionInterface
 
 from streaprous_socket.streaprous_raw_connection import (
@@ -68,6 +70,7 @@ class Connection(ConnectionInterface):
         self._cwnd = cwnd
         self._rwnd = rwnd
         self._handshake_rtt = handshake_rtt
+        self._receive_stop = threading.Event()
         self._conn_info = conn_struct(
             client_ip, client_port, server_ip, server_port, state,
             server_seq, client_seq, expected_final_ack, last_activity
@@ -125,4 +128,10 @@ class Connection(ConnectionInterface):
         Returns:
             Received bytes, or empty bytes when the connection closes.
         """
-        return run_conn_recv(self._socket, self._conn_info)
+        return run_conn_recv(self._socket, self._conn_info, self._receive_stop)
+
+    def stop_receive(self):
+        """
+        Stop waiting for raw TCP packets.
+        """
+        self._receive_stop.set()

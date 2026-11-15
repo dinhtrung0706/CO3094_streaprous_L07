@@ -29,6 +29,14 @@ class CControl:
         self._wnd_lock = threading.Lock()
         self._in_fast_recovery = False
 
+    @property
+    def cwnd(self):
+        """
+        Return the current congestion window in bytes.
+        """
+        with self._wnd_lock:
+            return self._cwnd
+
     def can_send(self, data_size):
         """
         Check available congestion-window capacity.

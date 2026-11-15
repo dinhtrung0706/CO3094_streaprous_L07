@@ -14,12 +14,12 @@ from .connection_interface import ConnectionInterface
 from .constant import (
     PK_ILANE, PK_ITRANSID, PK_ILSEQ, MAX_RECEIVE_BUFFER, MAX_SEGMENT_SIZE,
     MASK_PSEQ, TRANSFER_ID_SIZE, ZERO_WINDOW_PROBE_INTERVAL,
-    ACK_MILESTONE_BYTES, MAX_ACK_DELAY,
+    ACK_MILESTONE_BYTES, MAX_ACK_DELAY, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT,
     RECV_STORED, RECV_DUPLICATE, RECV_FULL, RECV_ERROR, RECV_WAITING,
 )
 from .flow_control import FControl
 from .packet import (
-    ACK, CONTROL, DATA, EOM, HEADER_SIZE, PROBE, TRANSFER,
+    ACK, CONTROL, DATA, EOM, HEADER_SIZE, PROBE, PING, PONG, TRANSFER,
     VERSION, Packet, decode_ack_ranges, encode_ack_ranges,
 )
 from .stream_buffer import ReceiveBuffer, SendBuffer
@@ -31,7 +31,11 @@ class Session:
     Manage packet sending and receiving over an established connection.
     """
 
-    def __init__(self, conn: ConnectionInterface, max_retries, receive_dir="Downloads"):
+    def __init__(self, conn: ConnectionInterface,
+                 max_retries,
+                 receive_dir="Downloads",
+                 heartbeat_interval=HEARTBEAT_INTERVAL,
+                 heartbeat_timeout=HEARTBEAT_TIMEOUT):
         """
         Initialize lane trackers and shared transport controls.
 
@@ -39,31 +43,70 @@ class Session:
             conn: Established connection.
             max_retries: Maximum retransmission attempts per packet.
             receive_dir: Directory used for transfers saved to disk
+            heartbeat_interval: Seconds without incoming packets before PING
+            heartbeat_timeout: Seconds to wait for PONG
         """
+        if heartbeat_interval <= 0 or heartbeat_timeout <= 0:
+            raise ValueError("Heartbeat interval and timeout must be positive")
+
+        # Send and receive
         self._conn = conn
-        self._send_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
-        self._recv_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
         self._recv_buffers = {}
         self._file_outputs = {}
         self._completed_files = {}
         self._receive_dir = Path(receive_dir)
+
+        # ACK metadata
+        self._send_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
+        self._recv_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
         self._next_packet_seq = 0
         self._last_window_seq = None
 
+        # Flow control and congestion control
         self._transmitter = Transmitter(conn.handshake_rtt, max_retries)
         self._fcontrol = FControl(conn.rwnd)
         self._ccontrol = CControl(conn.cwnd, conn.cwnd / 2)
 
+        # Pending stage of the packets
         self._pending_packets = {} # { packet_key : Packet }
+        self._next_data_send = 0.0
+
+        # Lock send/receive resouces
         self._send_lock = threading.Lock()
         self._recv_lock = threading.Lock()
+        self._ack_condition = threading.Condition(self._send_lock)
+        self._receive_condition = threading.Condition(self._recv_lock)
+
+        # Abort or close session
         self._aborted = False
+
+        # Probing (Ping for rwnd when previous rwnd = 0)
         self._probe_event = threading.Event()
         self._probe_thread = None
+
+        # Metadata for receiver to send ACK
         self._pending_acks = {} # { transfer_id : (Packet, accumulated_bytes) }
         self._ack_timer = None
+
+        # On receive error
+        self._receive_error = None
+
+        # Hearbeat
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_pong = threading.Event()
+        self._heartbeat_activity = threading.Event()
+        self._last_received = time.monotonic()
+        self._receiver_thread = threading.Thread(target=self._receive_loop, daemon=True)
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(heartbeat_interval, heartbeat_timeout), daemon=True
+        )
+
+        # Start necessary thread
         self._transmitter.start_thread_deadline(self)
         conn.register_disconnect_handler(self.abort)
+        self._receiver_thread.start()
+        self._heartbeat_thread.start()
         if self._fcontrol.rwnd == 0 and not self._aborted:
             self._start_probing()
 
@@ -178,9 +221,19 @@ class Session:
         """
         is_data = bool(packet.flags & DATA)
 
-        with self._send_lock:
+        with self._ack_condition:
             if not self._guard_active():
                 return False
+
+            if is_data:
+                delay = self._next_data_send - time.monotonic()
+                while delay > 0:
+                    # Release the send lock while waiting so ACKs can advance.
+                    self._ack_condition.wait(delay)
+                    if not self._guard_active():
+                        return False
+                    delay = self._next_data_send - time.monotonic()
+
             packet.packet_seq = self._next_packet_seq
             encoded = packet.encode()
             packet_size = len(encoded)
@@ -218,7 +271,14 @@ class Session:
                 print("[Session] Warning: Incomplete packet send")
                 return is_data
 
-            kind = "DATA" if is_data else "ACK" if packet.flags & ACK else "PROBE"
+            if is_data:
+                nr_packets = max(1, int(self._ccontrol.cwnd / packet_size))
+                pacing_interval = self._transmitter.pacing_time_before_send(nr_packets)
+                self._next_data_send = time.monotonic() + pacing_interval
+
+            kind = ("DATA" if is_data else "ACK" if packet.flags & ACK
+                    else "PING" if packet.flags == PING
+                    else "PONG" if packet.flags == PONG else "PROBE")
             transfer_id = (self._transfer_id(packet)
                            if packet.lane == TRANSFER and packet.flags & (DATA | ACK)
                            else None)
@@ -296,6 +356,40 @@ class Session:
             print(f"[Session] RETX id={transfer_id} seq={logical_seq} "
                   f"pseq={packet.packet_seq} packet_size={len(encoded)}")
             return True
+
+    def _heartbeat_loop(self, interval, timeout):
+        """
+        Send PING after receive inactivity and abort if PONG is missing.
+        """
+        while not self._heartbeat_stop.is_set():
+            self._heartbeat_activity.clear()
+            idle = time.monotonic() - self._last_received
+            if idle < interval:
+                self._heartbeat_activity.wait(interval - idle)
+                continue
+
+            self._heartbeat_pong.clear()
+            with self._recv_lock:
+                rwnd = self._receive_window()
+            if not self.send_packet(Packet(VERSION, CONTROL, PING, 0, 0, 0, rwnd)):
+                self.abort()
+                return
+            if not self._heartbeat_pong.wait(timeout) and not self._heartbeat_stop.is_set():
+                print("[Session] HEARTBEAT timeout")
+                self.abort()
+                return
+
+    def wait_for_pong(self, timeout):
+        """
+        Wait for a heartbeat reply during E2E testing.
+
+        Args:
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            True if a PONG arrived while the Session was active.
+        """
+        return self._heartbeat_pong.wait(timeout) and not self._aborted
 
     def _update_peer_window(self, packet: Packet):
         """
@@ -425,6 +519,7 @@ class Session:
             print(f"[Session] ACK id={transfer_id} cum={previous_ack}->{tracker.cumulative_ack()} "
                   f"range_count={len(ranges)} acked_packet_size={congestion_bytes} "
                   f"unacked_data_packets={len(self._pending_packets)}")
+            self._ack_condition.notify_all()
 
     def handle_dropped_packets(self, packet_keys):
         """
@@ -448,6 +543,7 @@ class Session:
 
             if congestion_bytes:
                 self._ccontrol.account_drop(congestion_bytes)
+            self._ack_condition.notify_all()
 
     def _acquire_receive_buffer(self, transfer_id: int) -> ReceiveBuffer:
         """
@@ -554,6 +650,7 @@ class Session:
             if self._complete_receive_file(transfer_id) == RECV_ERROR:
                 return None
 
+            self._receive_condition.notify_all()
             return self._completed_files.get(transfer_id, path)
 
     def _receive_window(self) -> int:
@@ -706,34 +803,80 @@ class Session:
 
         return status
 
-    def receive_transfer(self, transfer_id: int) -> Optional[bytes]:
+    def receive_transfer(self, transfer_id: int, wait=False) -> Optional[bytes]:
         """
-        Return completed in-memory transfer data.
+        Return completed in-memory transfer data, optionally waiting for it.
 
         Args:
-            transfer_id   transfer identifier
+            transfer_id: Transfer identifier.
+            wait: Wait until the transfer completes or the Session closes.
 
         Returns:
-            Completed bytes or None
+            Completed bytes or None.
         """
-        with self._recv_lock:
-            if transfer_id in self._file_outputs or transfer_id in self._completed_files:
-                return None
-            buffer = self._recv_buffers.get(transfer_id)
-            return buffer.form_receive_data() if buffer is not None else None
+        with self._receive_condition:
+            while True:
+                if transfer_id in self._file_outputs or transfer_id in self._completed_files:
+                    return None
+                buffer = self._recv_buffers.get(transfer_id)
+                data = buffer.form_receive_data() if buffer is not None else None
+                if data is not None:
+                    return data
+                if not wait or self._aborted:
+                    break
+                self._receive_condition.wait()
 
-    def receive_file(self, transfer_id: int) -> Optional[Path]:
+        if wait and self._receive_error is not None:
+            raise self._receive_error
+        return None
+
+    def receive_file(self, transfer_id: int, wait=False) -> Optional[Path]:
         """
-        Return the path of a completed file transfer.
+        Return a completed file path, optionally waiting for completion.
 
         Args:
-            transfer_id   transfer identifier
+            transfer_id: Transfer identifier.
+            wait: Wait until the file completes or the Session closes.
 
         Returns:
-            Completed file path or None
+            Completed file path or None.
         """
-        with self._recv_lock:
-            return self._completed_files.get(transfer_id)
+        with self._receive_condition:
+            while True:
+                path = self._completed_files.get(transfer_id)
+                if path is not None or not wait or self._aborted:
+                    break
+                self._receive_condition.wait()
+
+        if wait and self._receive_error is not None:
+            raise self._receive_error
+        return path
+
+    def wait_for_ack(self, transfer_id: int, logical_seq: int) -> bool:
+        """
+        Wait until an outgoing DATA packet is acknowledged or discarded.
+
+        Args:
+            transfer_id: Transfer identifier.
+            logical_seq: Logical sequence number.
+
+        Returns:
+            True if acknowledged, False if dropped or the Session closes.
+        """
+        key = (TRANSFER, transfer_id, logical_seq)
+        with self._ack_condition:
+            while not self._aborted:
+                tracker = self._acquire_tracker(self._send_trackers, TRANSFER, transfer_id)
+                if tracker is not None and (tracker.has_acked(logical_seq)
+                                            or tracker.is_cumulatively_acked(logical_seq)):
+                    return True
+                if key not in self._pending_packets:
+                    return False
+                self._ack_condition.wait()
+
+        if self._receive_error is not None:
+            raise self._receive_error
+        return False
 
     def close_receive_files(self):
         """
@@ -754,8 +897,23 @@ class Session:
                 return
             self._aborted = True
             print(f"[Session] ABORT unacked_data_packets={len(self._pending_packets)}")
+            self._ack_condition.notify_all()
 
+        with self._receive_condition:
+            self._receive_condition.notify_all()
         self._conn.unregister_disconnect_handler(self.abort)
+
+        # Stop PING/PONG and probing threads.
+        self._heartbeat_stop.set()
+        self._heartbeat_activity.set()
+        self._heartbeat_pong.set()
+        self._conn.stop_receive()
+
+        # Wait for background threads to finish.
+        if threading.current_thread() != self._receiver_thread:
+            self._receiver_thread.join()
+        if threading.current_thread() != self._heartbeat_thread:
+            self._heartbeat_thread.join()
         self._wait_close_probe()
         self._transmitter.abort()
 
@@ -774,31 +932,51 @@ class Session:
             self._pending_packets.clear()
             self._send_trackers = {CONTROL: ACKTracker(), TRANSFER: {}}
 
-    def receive_packet(self) -> Optional[Packet]:
+    def _receive_loop(self):
         """
-        Decode and handle one packet from the connection.
-
-        Returns:
-            Received packet, or None if the connection closes.
+        Receive and process incoming packets.
         """
-        if not self._guard_active():
-            return None
-        try:
-            data = self._conn.recv_data_segment()
-        except OSError as exc:
-            print(f"[Session] Warning: Connection receive failed: {exc}")
-            self.abort()
-            return None
-        if not data:
-            print("[Session] Warning: Connection closed; aborting incomplete transfers")
-            self.abort()
-            return None
-        if not self._guard_active():
-            return None
+        while not self._aborted:
+            try:
+                data = self._conn.recv_data_segment()
+                if self._aborted:
+                    break
+                if not data:
+                    print("[Session] Warning: Connection closed; aborting incomplete transfers")
+                    break
 
-        packet = Packet.decode(data)
+                packet = Packet.decode(data)
+                self._last_received = time.monotonic()
+                self._heartbeat_activity.set()
+                self._process_received_packet(packet)
+            except OSError as exc:
+                if not self._aborted:
+                    print(f"[Session] Warning: Connection receive failed: {exc}")
+                break
+            except (ValueError, TypeError) as exc:
+                self._receive_error = exc
+                break
+
+        if not self._aborted:
+            self.abort()
+
+    def _process_received_packet(self, packet):
+        """
+        Process DATA, ACK, PING, PONG, and other control packets.
+
+        Args:
+            packet: Decoded transport packet.
+        """
         response = None
-        if packet.flags & DATA:
+        if packet.flags == PING:
+            print("[Session] RX PING")
+            with self._recv_lock:
+                rwnd = self._receive_window()
+            response = Packet(VERSION, CONTROL, PONG, 0, 0, 0, rwnd)
+        elif packet.flags == PONG:
+            print("[Session] RX PONG")
+            self._heartbeat_pong.set()
+        elif packet.flags & DATA:
             with self._recv_lock:
                 status = self.handle_data(packet)
                 transfer_id = self._transfer_id(packet) if packet.lane == TRANSFER else None
@@ -809,6 +987,7 @@ class Session:
                       f"data_size={data_size} status={status}")
                 if status in (RECV_STORED, RECV_DUPLICATE):
                     response = self._schedule_ack(packet, status)
+                    self._receive_condition.notify_all()
         elif packet.flags == PROBE:
             print(f"[Session] RX PROBE rwnd={packet.rwnd}")
             with self._recv_lock:
@@ -818,4 +997,3 @@ class Session:
 
         if response is not None:
             self.send_packet(response)
-        return packet

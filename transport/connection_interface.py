@@ -28,6 +28,13 @@ class ConnectionInterface(ABC):
         pass
 
     @abstractmethod
+    def stop_receive(self):
+        """
+        Interrupt a blocking receive during Session shutdown.
+        """
+        pass
+
+    @abstractmethod
     def register_disconnect_handler(self, handler):
         pass
 
