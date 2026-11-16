@@ -76,6 +76,7 @@ _state_lock = threading.Lock()
 _round_robin_counters = {}
 _active_backends = {}
 _raw_session_lock = threading.Lock()
+_cached_raw_backend = None
 
 
 def reset_proxy_state():
@@ -362,75 +363,115 @@ def forward_request(
     return response
 
 
-def forward_session_request(
-    host, port, request, connect_timeout=None, read_timeout=None
-):
-    """Forward an HTTP exchange through a raw Session."""
-    from . import config
-    from .session_http import REQUEST_ID, RESPONSE_ID, receive_message, send_message
-    from streaprous_socket import streaprous_raw_connection as raw
-    from transport.connection import Connection
-    from transport.session import Session
+class _RawBackendSession:
+    """Reuse one RAW connection for a bounded number of HTTP requests."""
 
-    timeout = PROXY_CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
+    def __init__(self, host, port, timeout):
+        from . import config
+        from streaprous_socket import streaprous_raw_connection as raw
+        from transport.connection import Connection
+        from transport.session import Session
 
-    # The raw dispatcher and connection table currently support one outgoing
-    # connection to a backend at a time.
-    with _raw_session_lock:
-        sock = None
-        info = None
-        session = None
+        self.target = (socket.gethostbyname(host), int(port))
+        self.sock = None
+        self.info = None
+        self.session = None
+        self.requests = 0
         try:
+            route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                peer_ip = socket.gethostbyname(host)
-                route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                try:
-                    route.connect((peer_ip, int(port)))
-                    local_ip = route.getsockname()[0]
-                finally:
-                    route.close()
+                route.connect(self.target)
+                local_ip = route.getsockname()[0]
+            finally:
+                route.close()
 
-                sock = raw.create_raw_socket()
-                info = raw.connect(
-                    sock, local_ip, config.PROXY_RAW_PORT,
-                    peer_ip, int(port), timeout=timeout,
-                )
-            except TimeoutError:
-                raise GatewayTimeout("backend connection timed out")
-            except OSError as exc:
-                raise BadGateway("backend connection failed: {}".format(exc))
-
-            if info is None:
+            self.sock = raw.create_raw_socket()
+            self.info = raw.connect(
+                self.sock, local_ip, config.PROXY_RAW_PORT,
+                self.target[0], self.target[1], timeout=timeout,
+            )
+            if self.info is None:
                 raise BadGateway("backend raw handshake failed")
 
             connection = Connection(
-                socket=sock, **info._asdict(),
+                socket=self.sock, **self.info._asdict(),
                 cwnd=config.SESSION_CWND,
                 rwnd=config.SESSION_RWND,
                 handshake_rtt=config.SESSION_RTT,
             )
-            session = Session(connection, max_retries=config.SESSION_MAX_RETRIES)
-            if not send_message(session, _force_request_close(request), REQUEST_ID):
-                raise BadGateway("backend request transfer failed")
-            response = receive_message(session, RESPONSE_ID)
-        finally:
-            try:
-                if session is not None:
-                    session.abort()
-            finally:
-                if sock is not None:
-                    try:
-                        if info is not None:
-                            raw.close_connection(sock, info)
-                    finally:
-                        raw.stop_packet_dispatcher()
-                        sock.close()
+            self.session = Session(connection, max_retries=config.SESSION_MAX_RETRIES)
+        except Exception:
+            self.close()
+            raise
 
-    if not response:
-        raise BadGateway("backend returned an empty response")
-    if not response.startswith(b"HTTP/"):
-        raise BadGateway("backend returned a non-HTTP response")
-    return response
+    def close(self):
+        from streaprous_socket import streaprous_raw_connection as raw
+
+        try:
+            if self.session is not None:
+                self.session.abort()
+        finally:
+            if self.sock is not None:
+                try:
+                    if self.info is not None:
+                        raw.close_connection(self.sock, self.info)
+                finally:
+                    raw.stop_packet_dispatcher()
+                    self.sock.close()
+        self.session = None
+        self.sock = None
+
+
+def forward_session_request(
+    host, port, request, connect_timeout=None, read_timeout=None
+):
+    """Forward HTTP through a reusable RAW Session."""
+    from .session_http import (
+        REQUEST_ID, RESPONSE_ID, SESSION_HTTP_MAX_REQUESTS,
+        TRANSFER_ID_STRIDE, receive_message, send_message,
+    )
+
+    global _cached_raw_backend
+    timeout = PROXY_CONNECT_TIMEOUT if connect_timeout is None else connect_timeout
+    target = (socket.gethostbyname(host), int(port))
+
+    # The RAW dispatcher supports one outgoing proxy connection at a time.
+    with _raw_session_lock:
+        backend = _cached_raw_backend
+        if backend is not None and (
+            backend.target != target or backend.requests >= SESSION_HTTP_MAX_REQUESTS
+        ):
+            _cached_raw_backend = None
+            backend.close()
+            backend = None
+
+        try:
+            if backend is None:
+                try:
+                    backend = _RawBackendSession(host, port, timeout)
+                except TimeoutError:
+                    raise GatewayTimeout("backend connection timed out")
+                except OSError as exc:
+                    raise BadGateway("backend connection failed: {}".format(exc))
+                _cached_raw_backend = backend
+
+            index = backend.requests
+            request_id = REQUEST_ID + index * TRANSFER_ID_STRIDE
+            response_id = RESPONSE_ID + index * TRANSFER_ID_STRIDE
+            if not send_message(backend.session, _force_request_close(request), request_id):
+                raise BadGateway("backend request transfer failed")
+            response = receive_message(backend.session, response_id)
+            if not response:
+                raise BadGateway("backend returned an empty response")
+            if not response.startswith(b"HTTP/"):
+                raise BadGateway("backend returned a non-HTTP response")
+            backend.requests += 1
+            return response
+        except Exception:
+            if backend is not None:
+                _cached_raw_backend = None
+                backend.close()
+            raise
 
 
 def _substitute_header_value(value, hostname, request, client_ip):

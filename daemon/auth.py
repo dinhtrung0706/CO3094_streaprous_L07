@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from .database import Database
 from .errors import BadRequest, UnsupportedMediaType
+from .peer_crypto import PeerCrypto
 from .response import Response
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,6 @@ class AuthService:
         session_ttl=SESSION_TTL_SECONDS,
         cookie_secure=False,
         password_iterations=PASSWORD_ITERATIONS,
-        peer_secret=None,
     ):
         self.database = (
             database if isinstance(database, Database) else Database(database)
@@ -78,17 +78,7 @@ class AuthService:
         if not isinstance(signing_key, bytes) or len(signing_key) < 32:
             raise ValueError("session signing key must be at least 32 bytes")
         self._signing_key = signing_key
-        configured_peer_secret = peer_secret or os.environ.get(
-            "STREAPROUS_PEER_SECRET"
-        )
-        if configured_peer_secret is None:
-            self._peer_secret = self._signing_key
-        elif isinstance(configured_peer_secret, str):
-            self._peer_secret = configured_peer_secret.encode("utf-8")
-        else:
-            self._peer_secret = bytes(configured_peer_secret)
-        if len(self._peer_secret) < 32:
-            raise ValueError("peer secret must be at least 32 bytes")
+        self.peer_crypto = PeerCrypto(self.database)
         self._digest_nonces = {}
         self._digest_lock = threading.Lock()
         self._digest_counts = {}
@@ -197,47 +187,6 @@ class AuthService:
         message = purpose + b":" + value.encode("ascii")
         return _b64url(hmac.new(self._signing_key, message, hashlib.sha256).digest())
 
-    def issue_peer_token(self, username, ttl=3600):
-        """Return a signed token proving ``username`` to another peer."""
-        if not isinstance(username, str) or not username:
-            raise ValueError("username is required")
-        ttl = int(ttl)
-        if ttl <= 0:
-            raise ValueError("ttl must be positive")
-        expires_at = int(time.time()) + ttl
-        payload = f"{username}|{expires_at}".encode()
-        signature = hmac.new(self._peer_secret, b"peer:" + payload,
-                             hashlib.sha256).digest()
-        return _b64url(payload) + "." + _b64url(signature)
-
-    def verify_peer_token(self, token):
-        """Return the username for a valid token, otherwise ``None``."""
-        if not isinstance(token, str) or token.count(".") != 1:
-            return None
-        encoded_payload, encoded_signature = token.split(".")
-        try:
-            payload = base64.urlsafe_b64decode(
-                encoded_payload + "=" * (-len(encoded_payload) % 4)
-            )
-            signature = base64.urlsafe_b64decode(
-                encoded_signature + "=" * (-len(encoded_signature) % 4)
-            )
-        except (ValueError, TypeError):
-            return None
-        expected = hmac.new(
-            self._peer_secret, b"peer:" + payload, hashlib.sha256
-        ).digest()
-        if not hmac.compare_digest(signature, expected):
-            return None
-        username, _separator, expires_at = payload.decode("utf-8", "replace").rpartition("|")
-        try:
-            expires_at = int(expires_at)
-        except ValueError:
-            return None
-        if not username or expires_at < int(time.time()):
-            return None
-        return username
-
     def issue_digest_challenge(self):
         """Create an expiring nonce for an HTTP Digest challenge."""
         nonce = _b64url(secrets.token_bytes(24))
@@ -330,30 +279,33 @@ class AuthService:
             state["counts"][replay_key] = count
         return self._public_user(user)
 
-    def verify_peer_request(self, username, timestamp, signature, body):
-        """Verify a short-lived peer signature over identity and HTTP body."""
+    def verify_peer_request(self, username, timestamp, signature, body, path):
+        """Verify peer-specific X25519-derived MAC for an HTTP POST."""
         try:
             timestamp = int(timestamp)
         except (TypeError, ValueError):
             return False
         if abs(int(time.time()) - timestamp) > 60:
             return False
-        message = username.encode("utf-8") + b"\n" + str(timestamp).encode() \
-            + b"\n" + bytes(body)
-        expected = _b64url(hmac.new(
-            self._peer_secret, message, hashlib.sha256
-        ).digest())
-        return isinstance(signature, str) and hmac.compare_digest(
-            expected, signature
-        )
+        public = self.peer_crypto.pinned(username)
+        if public is None:
+            return False
+        message = (username.encode("utf-8") + b"\n" +
+                   str(timestamp).encode("ascii") + b"\n" +
+                   path.encode("utf-8") + b"\n" + bytes(body))
+        return self.peer_crypto.verify_mac(public, "http-post", message,
+                                           signature)
 
-    def sign_peer_request(self, username, timestamp, body):
-        message = username.encode("utf-8") + b"\n" + str(timestamp).encode() \
-            + b"\n" + bytes(body)
-        return _b64url(hmac.new(
-            self._peer_secret, message, hashlib.sha256
-        ).digest())
-
+    def sign_peer_request(self, username, timestamp, body, recipient, path):
+        if not username or not recipient:
+            raise ValueError("sender and recipient are required")
+        public = self.peer_crypto.pinned(recipient)
+        if public is None:
+            raise ValueError("recipient public key is not trusted")
+        message = (username.encode("utf-8") + b"\n" +
+                   str(int(timestamp)).encode("ascii") + b"\n" +
+                   path.encode("utf-8") + b"\n" + bytes(body))
+        return self.peer_crypto.mac(public, "http-post", message)
 
     def _csrf_for_token(self, token):
         return self._signature(b"csrf", token)
@@ -552,7 +504,6 @@ def install_auth(
     signing_key=None,
     cookie_secure=None,
     password_iterations=None,
-    peer_secret=None,
 ):
     """Install account endpoints on an app using environment-based settings."""
     existing = getattr(app, "_streaprous_auth_service", None)
@@ -569,7 +520,6 @@ def install_auth(
     options = {
         "signing_key": signing_key,
         "cookie_secure": cookie_secure,
-        "peer_secret": peer_secret,
     }
     if password_iterations is not None:
         options["password_iterations"] = int(password_iterations)

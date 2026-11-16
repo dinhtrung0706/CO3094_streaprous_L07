@@ -33,7 +33,9 @@ class ChatService:
                 "channel name must be 1-32 characters: letters, digits, "
                 "space, '.', '_' or '-'"
             )
-        if self.database.get_channel_by_name(name) is not None:
+        if self.database.get_channel_by_name(
+            name, is_private=is_private, owner_name=owner["username"]
+        ) is not None:
             raise ValueError("channel already exists")
 
         channel_id = uuid.uuid4().hex
@@ -82,15 +84,17 @@ class ChatService:
 
     def invite_member(self, channel_id, owner, username):
         channel = self.require_channel(channel_id)
-        if channel["owner_name"].casefold() != owner["username"].casefold():
+        if (channel["owner_name"].casefold() != owner["username"].casefold()
+                and channel.get("owner_id") != owner["id"]):
             raise Forbidden("only the channel owner can invite members")
         if not isinstance(username, str) or not CHAT_USERNAME_RE.fullmatch(
             username.strip()
         ):
             raise BadRequest("invited username is invalid")
         username = username.strip()
+        user = self.database.get_user(username)
         added = self.database.add_channel_member(
-            channel_id, username, int(self._clock())
+            channel_id, user["id"] if user else username, int(self._clock())
         )
         return {"channel_id": channel_id, "username": username, "added": added}
 

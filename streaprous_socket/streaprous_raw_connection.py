@@ -460,7 +460,7 @@ def accept(s: socket.socket, listen_ip: str, listen_port: int, interface_name: O
     try:
         while True:
             # Get packet from dispatcher queue (for SYN packets)
-            syn_q = get_packet_queue(_SYN_KEY)
+            syn_q = get_packet_queue((_SYN_KEY[0], listen_port))
             try:
                 packet, _addr = syn_q.get(timeout=1.0)
                 print(f"[Streap_raw] accept: Got packet from SYN queue")

@@ -5,32 +5,48 @@
   const ui = {
     network: $("networkState"), user: $("currentUser"), notice: $("notice"),
     peers: $("peerList"), channels: $("channelList"),
-    title: $("conversationTitle"), type: $("conversationType"), subtitle: $("conversationSubtitle"),
+    title: $("conversationTitle"), subtitle: $("conversationSubtitle"),
     messages: $("messages"), input: $("messageInput"), send: $("sendButton"),
     refreshMessages: $("refreshMessages"), lookup: $("lookupPeerButton"),
     join: $("joinChannelButton"), leave: $("leaveChannelButton"), invite: $("inviteButton"),
-    inviteDialog: $("inviteDialog"), inviteUsername: $("inviteUsername")
+    inviteDialog: $("inviteDialog"), inviteAccount: $("inviteAccount"),
+    attach: $("attachButton"), fileInput: $("fileInput")
   };
 
   const state = {
     user: null, csrf: "", mode: "", peers: [], channels: [], selected: null,
-    history: new Map(), cursors: new Map(), initialized: new Set(), unread: new Map(),
-    busy: false, polling: false, stopped: false, sinceLastRefresh: 0
+    history: new Map(), files: new Map(), cursors: new Map(), initialized: new Set(), unread: new Map(),
+    busy: false, polling: false, stopped: false, sinceLastRefresh: 0,
+    agentToken: null, uploading: null
   };
   const POLL_MS = 4000;
   const HISTORY_LIMIT = 100;
+  const AGENT_URL = "http://127.0.0.1:8765";
+  const FILE_LIMIT = 2 * 1024 * 1024 * 1024;
+  const UPLOAD_CHUNK = 256 * 1024;
 
+  let noticeTimer;
   function inform(message, kind = "info") {
+    clearTimeout(noticeTimer);
     ui.notice.textContent = message;
+    ui.notice.hidden = !message;
     ui.notice.dataset.kind = kind;
+    if (message && kind !== "error") {
+      noticeTimer = setTimeout(() => { ui.notice.hidden = true; }, 4000);
+    }
   }
 
-  function setNetwork(online, detail = "") {
-    ui.network.textContent = detail || (online ? "API đang kết nối" : "Mất kết nối API");
+  function setNetwork(online) {
+    const label = online ? "API connected" : "API disconnected";
+    ui.network.title = label;
+    ui.network.setAttribute("aria-label", label);
     ui.network.dataset.kind = online ? "online" : "offline";
   }
 
   async function api(path, { method = "GET", body, timeout = 7000 } = {}) {
+    if (state.mode === "server" && path.startsWith("/api/direct-messages/")) {
+      return agentApi(path, { method, body });
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     const headers = { Accept: "application/json" };
@@ -47,7 +63,7 @@
         const raw = await response.text();
         if (raw) {
           try { payload = JSON.parse(raw); }
-          catch (_) { throw new Error(`Backend trả dữ liệu không phải JSON (HTTP ${response.status}).`); }
+          catch (_) { throw new Error(`Backend returned non-JSON data (HTTP ${response.status}).`); }
         }
       }
       if (!response.ok) {
@@ -55,23 +71,56 @@
           state.stopped = true;
           window.location.replace("/login.html");
         }
-        const error = new Error(payload?.error || `HTTP ${response.status}`);
+        const error = new Error((payload && payload.error) || `HTTP ${response.status}`);
         error.status = response.status;
         throw error;
       }
       setNetwork(true);
       return payload;
     } catch (error) {
-      if (error.name === "AbortError") throw new Error("Kết nối Backend quá thời gian chờ.");
+      if (error.name === "AbortError" || error.name === "TypeError") setNetwork(false);
+      if (error.name === "AbortError") throw new Error("Backend request timed out.");
       throw error;
     } finally {
       clearTimeout(timer);
     }
   }
 
+  async function agentApi(path, { method = "GET", body } = {}) {
+    if (!state.agentToken) throw new Error("Local P2P client not connected. Run start_chat.py --mode client on this machine.");
+    const response = await fetch(AGENT_URL + path, {
+      method,
+      headers: { "Content-Type": "application/json", "X-Agent-Token": state.agentToken },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store"
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error((result && result.error) || `Peer agent HTTP ${response.status}`);
+    return result;
+  }
+
+  async function attachAgent() {
+    const identityResponse = await fetch(AGENT_URL + "/identity", { cache: "no-store" });
+    if (!identityResponse.ok) throw new Error("Local P2P client is unavailable.");
+    const identity = await identityResponse.json();
+    const ticket = await api("/api/agent/ticket", {
+      method: "POST", body: { public_key: identity.public_key }
+    });
+    const response = await fetch(AGENT_URL + "/attach", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticket: ticket.ticket })
+    });
+    const result = await response.json();
+    if (!response.ok || result.username.toLowerCase() !== state.user.username.toLowerCase()) {
+      throw new Error((result && result.error) || "Local peer identity mismatch");
+    }
+    state.agentToken = result.token;
+    if (state.selected) renderConversation();
+  }
+
   function createText(tag, value, className) {
     const element = document.createElement(tag);
-    element.textContent = String(value ?? "");
+    element.textContent = String(value == null ? "" : value);
     if (className) element.className = className;
     return element;
   }
@@ -85,7 +134,7 @@
   }
 
   function isOwn(name) {
-    return String(name || "").toLowerCase() === String(state.user?.username || "").toLowerCase();
+    return String(name || "").toLowerCase() === String((state.user && state.user.username) || "").toLowerCase();
   }
 
   function peerRoom(username) { return { type: "dm", username }; }
@@ -98,10 +147,10 @@
   }
 
   function renderPeers() {
-    ui.peers.replaceChildren();
+    ui.peers.textContent = "";
     const peers = state.peers.filter((p) => p.username && !isOwn(p.username));
     if (!peers.length) {
-      ui.peers.append(createText("p", "Chưa có Peer online. Kiểm tra Tracker hoặc thử nhập username.", "empty-small"));
+      ui.peers.append(createText("p", state.mode === "server" ? "No other registered accounts." : "No peers online. Check the tracker or enter a username.", "empty-small"));
       return;
     }
     for (const peer of peers) {
@@ -112,17 +161,17 @@
       button.setAttribute("aria-current", String(currentKey() === key));
       const main = createText("span", "", "item-main");
       main.append(createText("strong", peer.username));
-      main.append(createText("small", `${peer.ip || "?"}:${peer.port ?? "?"} UDP`));
-      button.append(main, pill(state.unread.get(key) ? `${state.unread.get(key)} mới` : "Online", true));
+      main.append(createText("small", state.mode === "server" ? "Account" : `${peer.ip || "?"}:${peer.port || "?"} ${state.peerTransport.toUpperCase()}`));
+      button.append(main, pill(state.unread.get(key) ? `${state.unread.get(key)} new` : (state.mode === "server" ? (peer.online ? "Online" : "Offline") : "Online"), state.mode !== "server" || Boolean(peer.online)));
       button.addEventListener("click", () => selectRoom(room));
       ui.peers.append(button);
     }
   }
 
   function renderChannels() {
-    ui.channels.replaceChildren();
+    ui.channels.textContent = "";
     if (!state.channels.length) {
-      ui.channels.append(createText("p", "Chưa có Channel. Hãy tạo một Channel mới.", "empty-small"));
+      ui.channels.append(createText("p", "No channels yet. Create one to begin.", "empty-small"));
       return;
     }
     for (const channel of state.channels) {
@@ -133,8 +182,10 @@
       button.setAttribute("aria-current", String(currentKey() === key));
       const main = createText("span", "", "item-main");
       main.append(createText("strong", `${channel.is_private ? "🔒 " : "# "}${channel.name}`));
-      main.append(createText("small", `${Number(channel.member_count || 0)} thành viên`));
-      button.append(main, pill(state.unread.get(key) ? `${state.unread.get(key)} mới` : (channel.joined ? "Đã tham gia" : "Tham gia"), Boolean(channel.joined)));
+      main.append(createText("small", channel.is_private
+        ? `@${channel.owner_name || "unknown"} · ${Number(channel.member_count || 0)} members`
+        : `${Number(channel.member_count || 0)} members`));
+      button.append(main, pill(state.unread.get(key) ? `${state.unread.get(key)} new` : (channel.joined ? "Joined" : "Join"), Boolean(channel.joined)));
       button.addEventListener("click", () => selectRoom(room));
       ui.channels.append(button);
     }
@@ -142,21 +193,26 @@
 
   function renderConversation() {
     const room = state.selected;
-    const channel = room?.type === "channel" ? channelById(room.id) : null;
-    const joined = Boolean(channel?.joined);
-    ui.type.textContent = !room ? "HỘI THOẠI" : room.type === "dm" ? "TIN NHẮN RIÊNG" : "CHANNEL";
-    ui.title.textContent = !room ? "Chọn Peer hoặc Channel" : room.type === "dm" ? `@${room.username}` : `# ${channel?.name || room.id}`;
-    ui.subtitle.textContent = !room ? "Chọn một mục bên trái để bắt đầu." :
-      room.type === "dm" ? "Trò chuyện trực tiếp giữa các Peer; lịch sử trên Peer hiện tại." :
-        `${channel?.is_private ? "Riêng tư" : "Công khai"} · ${channel?.member_count || 0} thành viên`;
+    const channel = (room && room.type) === "channel" ? channelById(room.id) : null;
+    const joined = Boolean((channel && channel.joined));
+    ui.title.textContent = !room ? "Select a conversation" : room.type === "dm" ? `@${room.username}` :
+      `${channel && channel.is_private ? "🔒" : "#"} ${(channel && channel.name) || room.id}`;
+    ui.subtitle.textContent = !room || room.type === "dm" ? "" :
+      `${channel && channel.is_private ? `Private · @${channel.owner_name || "unknown"}` : "Public"} · ${(channel && channel.member_count) || 0} members`;
     ui.join.hidden = !(channel && !joined && !channel.is_private);
     ui.leave.hidden = !(channel && joined);
-    ui.invite.hidden = !(channel && joined && isOwn(channel.owner_name));
-    ui.lookup.hidden = !(room && room.type === "dm");
+    ui.invite.hidden = !(channel && joined && (isOwn(channel.owner_name) ||
+      (state.user && channel.owner_id != null && Number(channel.owner_id) === Number(state.user.id))));
+    ui.lookup.hidden = state.mode === "server" || !(room && room.type === "dm");
     ui.refreshMessages.disabled = !room || (room.type === "channel" && !joined);
     ui.input.disabled = !room || (room.type === "channel" && !joined) || state.busy;
     ui.send.disabled = ui.input.disabled;
-    ui.input.placeholder = !room ? "Chọn hội thoại trước khi gửi" : (channel && !joined ? "Tham gia Channel để gửi tin" : "Nhập tin nhắn… (Enter để gửi)");
+    const canAttach = Boolean(room && state.mode === "server" &&
+      (room.type === "dm" ? state.agentToken : joined));
+    ui.attach.hidden = !canAttach;
+    ui.attach.disabled = !canAttach || Boolean(state.uploading);
+    ui.fileInput.disabled = ui.attach.disabled;
+    ui.input.placeholder = !room ? "Select a conversation before sending" : (channel && !joined ? "Join the channel to send messages" : "Type a message… (Enter to send)");
     renderMessages();
     renderPeers();
     renderChannels();
@@ -164,7 +220,21 @@
 
   function prettyDate(value) {
     const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
-    return Number.isFinite(date.getTime()) ? date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : "";
+    return Number.isFinite(date.getTime()) ? date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) : "";
+  }
+
+  function fileSize(bytes) {
+    return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MiB` :
+      `${Math.ceil(bytes / 1024)} KiB`;
+  }
+
+  function eventTime(item) {
+    const value = item.created_at == null ? item.ts : item.created_at;
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    if (item.status === "receiving") return Date.now() / 1000;
+    const parsed = value == null ? NaN : Date.parse(value);
+    return Number.isFinite(parsed) ? parsed / 1000 : 0;
   }
 
   function renderMessages() {
@@ -173,37 +243,177 @@
     const keepBottom = state.lastRenderedKey !== key || wasNearBottom;
     const previousTop = ui.messages.scrollTop;
     state.lastRenderedKey = key;
-    ui.messages.replaceChildren();
+    ui.messages.textContent = "";
     if (!key) {
-      ui.messages.append(createText("p", "Chọn một Peer hoặc Channel để xem tin nhắn.", "empty-chat"));
+      ui.messages.append(createText("p", "Select a conversation.", "empty-chat"));
       return;
     }
-    const records = state.history.get(key) || [];
-    if (!records.length) {
-      ui.messages.append(createText("p", "Chưa có tin nhắn trong hội thoại này.", "empty-chat"));
+
+    const entries = (state.history.get(key) || []).map((item, index) => ({ item, index, kind: "message" }));
+    const files = state.files.get(key) || [];
+    files.forEach((item, index) => entries.push({ item, index, kind: "file" }));
+    if (state.uploading && state.uploading.key === key) {
+      entries.push({ item: state.uploading, index: files.length, kind: "file" });
+    }
+    if (!entries.length) {
+      ui.messages.append(createText("p", "No messages yet.", "empty-chat"));
       return;
     }
-    const ordered = [...records].sort((a, b) => (Number(a.seq || 0) - Number(b.seq || 0)) || (Number(a.created_at || 0) - Number(b.created_at || 0)));
-    for (const item of ordered) {
+    entries.sort((a, b) => eventTime(a.item) - eventTime(b.item) ||
+      (a.kind === b.kind ? a.index - b.index : a.kind === "message" ? -1 : 1));
+    const room = state.selected;
+    for (const entry of entries) {
+      const item = entry.item;
       const sender = item.sender || item.username || item.from || "unknown";
       const row = createText("article", "", isOwn(sender) ? "message mine" : "message");
       const meta = createText("div", "", "message-meta");
-      meta.append(createText("strong", sender), createText("span", prettyDate(item.created_at ?? item.ts)));
-      row.append(meta, createText("div", item.body ?? "", "message-body"));
+      const timestamp = eventTime(item);
+      meta.append(createText("strong", sender), createText("span", timestamp ? prettyDate(timestamp) : ""));
+      row.append(meta);
+      if (entry.kind === "message") {
+        row.append(createText("div", (item.body == null ? "" : item.body), "message-body"));
+      } else {
+        const bubble = createText("div", "", "message-body file-message");
+        const name = createText("strong", `📎 ${item.name}`, "file-name");
+        bubble.append(name, createText("small", fileSize(item.size), "file-size"));
+        if (["uploading", "sending", "receiving"].includes(item.status)) {
+          const progress = document.createElement("progress");
+          progress.max = 100;
+          progress.value = item.progress || 0;
+          bubble.append(progress, createText("small", `${item.status} · ${progress.value}%`, "file-status"));
+        } else if (item.status === "queued" || item.status === "failed") {
+          bubble.append(createText("small", item.status === "failed" ? "Failed" : "Sent", "file-status"));
+        } else {
+          const button = createText("button", "Download", "button small file-download");
+          button.type = "button";
+          button.addEventListener("click", () => downloadFile(item, room));
+          bubble.append(button);
+        }
+        row.append(bubble);
+      }
       ui.messages.append(row);
     }
     ui.messages.scrollTop = keepBottom ? ui.messages.scrollHeight : previousTop;
   }
 
+  async function fetchFiles(room) {
+    if (state.mode !== "server") return;
+    if (room.type === "channel" && !(channelById(room.id) && channelById(room.id).joined)) return;
+    if (room.type === "dm" && !state.agentToken) return;
+    const data = room.type === "channel"
+      ? await api(`/api/channels/${encodeURIComponent(room.id)}/files`)
+      : await agentApi(`/api/files?peer=${encodeURIComponent(room.username)}`);
+    state.files.set(conversationKey(room), data.files || []);
+    if (currentKey() === conversationKey(room)) renderMessages();
+  }
+
+  function saveBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  function fromBase64(encoded) {
+    const binary = atob(encoded);
+    const result = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) result[i] = binary.charCodeAt(i);
+    return result;
+  }
+
+  function toBase64(bytes) {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 32768) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+    }
+    return btoa(binary);
+  }
+
+  function readFileChunk(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(new Uint8Array(reader.result));
+      reader.onerror = () => reject(reader.error || new Error("Could not read file."));
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  async function downloadFile(file, room) {
+    try {
+      if (room.type === "dm") {
+        const response = await fetch(`${AGENT_URL}/api/files/${encodeURIComponent(file.id)}`, {
+          headers: { "X-Agent-Token": state.agentToken }, cache: "no-store"
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        saveBlob(await response.blob(), file.name);
+      } else {
+        const base = `/api/channels/${encodeURIComponent(room.id)}/files/${encodeURIComponent(file.id)}`;
+        const chunks = [];
+        const total = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK));
+        for (let index = 0; index < total; index += 1) {
+          const result = await api(`${base}/chunks?index=${index}`, { timeout: 30000 });
+          chunks.push(fromBase64(result.data));
+        }
+        saveBlob(new Blob(chunks, { type: "application/octet-stream" }), file.name);
+      }
+    } catch (error) { inform(`Download failed: ${error.message}`, "error"); }
+  }
+
+  async function sendFile() {
+    const room = state.selected;
+    const file = ui.fileInput.files[0];
+    if (!room || !file || state.mode !== "server" || state.uploading) return;
+    if (file.size > FILE_LIMIT) {
+      inform("File limit is 2 GiB", "error");
+      ui.fileInput.value = "";
+      return;
+    }
+    state.uploading = { key: conversationKey(room), sender: state.user.username,
+      name: file.name, size: file.size, created_at: Date.now() / 1000,
+      status: "uploading", progress: 0 };
+    renderConversation();
+    const isChannel = room.type === "channel";
+    const base = isChannel
+      ? `/api/channels/${encodeURIComponent(room.id)}/files`
+      : `/api/files/uploads/${encodeURIComponent(room.username)}`;
+    try {
+      const send = isChannel ? api : agentApi;
+      const started = await send(base, { method: "POST", body: { name: file.name, size: file.size }, timeout: 30000 });
+      const uploadId = encodeURIComponent(started.file.id);
+      const total = Math.ceil(file.size / UPLOAD_CHUNK);
+      for (let index = 0; index < total; index += 1) {
+        const bytes = await readFileChunk(file.slice(index * UPLOAD_CHUNK, (index + 1) * UPLOAD_CHUNK));
+        await send(`${base}/${uploadId}${isChannel ? "/chunks" : ""}`, {
+          method: "PUT", body: { index, data: toBase64(bytes) }, timeout: 30000
+        });
+        if (index % 16 === 0 || index + 1 === total) {
+          state.uploading.progress = Math.floor((index + 1) * 100 / total);
+          if (currentKey() === state.uploading.key) renderMessages();
+        }
+      }
+      await send(`${base}/${uploadId}/complete`, { method: "POST", body: {}, timeout: 30000 });
+      await fetchFiles(room);
+    } catch (error) { inform(`File transfer failed: ${error.message}`, "error"); }
+    finally {
+      ui.fileInput.value = "";
+      state.uploading = null;
+      renderConversation();
+    }
+  }
+
   async function listPeers() {
     const result = await api("/api/peers");
-    state.peers = Array.isArray(result?.peers) ? result.peers : [];
+    state.peers = Array.isArray((result && result.peers)) ? result.peers : [];
     renderPeers();
   }
 
   async function listChannels() {
     const result = await api("/api/channels");
-    state.channels = Array.isArray(result?.channels) ? result.channels : [];
+    state.channels = Array.isArray((result && result.channels)) ? result.channels : [];
     renderConversation();
   }
 
@@ -214,7 +424,7 @@
   }
 
   async function fetchMessages(room) {
-    if (room.type === "channel" && !channelById(room.id)?.joined) return;
+    if (room.type === "channel" && !(channelById(room.id) && channelById(room.id).joined)) return;
     const key = conversationKey(room);
     const cursor = state.cursors.get(key) || 0;
     let since = cursor;
@@ -222,7 +432,7 @@
     for (let page = 0; page < 3; page += 1) {
       const url = `${pathFor(room)}?since=${since}&limit=${HISTORY_LIMIT}`;
       const data = await api(url);
-      const fetched = Array.isArray(data?.messages) ? data.messages : [];
+      const fetched = Array.isArray((data && data.messages)) ? data.messages : [];
       const existing = state.history.get(key) || [];
       const seen = new Set(existing.map((row) => String(row.id)));
       const unique = fetched.filter((row) => row && row.id != null && !seen.has(String(row.id)));
@@ -233,7 +443,7 @@
           newCount += incoming.length;
         }
       }
-      const next = Number(data?.next_since ?? since);
+      const next = Number((data && data.next_since != null ? data.next_since : since));
       if (Number.isFinite(next) && next > since) since = next;
       if (fetched.length < HISTORY_LIMIT || next <= cursor) break;
     }
@@ -241,7 +451,7 @@
     state.initialized.add(key);
     if (newCount) {
       if (currentKey() !== key) state.unread.set(key, (state.unread.get(key) || 0) + newCount);
-      inform(`Có ${newCount} tin nhắn mới${room.type === "dm" ? ` từ @${room.username}` : " trong Channel"}.`, "success");
+      inform(`Received ${newCount} new messages${room.type === "dm" ? ` from @${room.username}` : " in this channel"}.`, "success");
     }
     if (currentKey() === key) renderMessages();
     if (newCount) { renderPeers(); renderChannels(); }
@@ -253,16 +463,16 @@
     renderConversation();
     try {
       await fetchMessages(room);
-      inform(`Đang xem ${room.type === "dm" ? `@${room.username}` : `#${channelById(room.id)?.name || room.id}`}.`);
-    } catch (error) { inform(`Không tải được tin nhắn: ${error.message}`, "error"); }
+      await fetchFiles(room);
+    } catch (error) { inform(`Could not load messages: ${error.message}`, "error"); }
   }
 
   function randomMessageId() {
-    if (window.crypto?.getRandomValues) {
+    if ((window.crypto && window.crypto.getRandomValues)) {
       const bytes = window.crypto.getRandomValues(new Uint8Array(16));
       return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
     }
-    throw new Error("Trình duyệt không hỗ trợ sinh ID ngẫu nhiên an toàn.");
+    throw new Error("Your browser cannot generate secure random IDs.");
   }
 
   async function postMessage(event) {
@@ -279,10 +489,9 @@
       await api(pathFor(room), { method: "POST", body: { body, client_id: clientId } });
       ui.input.value = "";
       delete ui.input.dataset.pendingId;
-      inform("Backend đã nhận/lưu tin. Chưa có xác nhận người nhận đã đọc hoặc nhận.", "success");
       await fetchMessages(room);
     } catch (error) {
-      inform(`Không gửi được: ${error.message}. Có thể bấm gửi lại với cùng ID để tránh lưu trùng.`, "error");
+      inform(`Could not send: ${error.message}. You can retry with the same ID to avoid duplicates.`, "error");
     } finally {
       state.busy = false;
       renderConversation();
@@ -296,8 +505,8 @@
     try {
       if (action === "lookup" && room.type === "dm") {
         const result = await api("/api/peers/connect", { method: "POST", body: { username: room.username } });
-        const peer = result?.peer;
-        inform(peer ? `Địa chỉ @${peer.username}: ${peer.ip}:${peer.port} (UDP). Đây là tra cứu, chưa phải ACK kết nối.` : "Không tìm thấy Peer.", "success");
+        const peer = (result && result.peer);
+        inform(peer ? `Address @${peer.username}: ${peer.ip}:${peer.port} (${state.peerTransport.toUpperCase()}).` : "Peer is not online.", "success");
         return;
       }
       if (room.type !== "channel") return;
@@ -305,7 +514,7 @@
       await api(path, { method: "POST", body: {} });
       await listChannels();
       if (action === "join") await fetchMessages(room);
-      inform(action === "join" ? "Đã tham gia Channel." : "Đã rời Channel.", "success");
+      inform(action === "join" ? "Joined Channel." : "Left channel.", "success");
     } catch (error) { inform(error.message, "error"); }
   }
 
@@ -313,11 +522,20 @@
     if (state.polling || state.stopped || document.hidden) return;
     state.polling = true;
     try {
-      if (state.selected) await fetchMessages(state.selected);
+      if (state.selected) {
+        await fetchMessages(state.selected);
+        await fetchFiles(state.selected);
+      }
+      if (state.mode === "server") await listChannels();
       state.sinceLastRefresh += 1;
       if (state.sinceLastRefresh >= 4) {
         state.sinceLastRefresh = 0;
-        await Promise.all([listPeers(), listChannels()]);
+        await listPeers();
+        if (state.mode !== "server") await listChannels();
+        if (state.mode === "server" && !state.agentToken) {
+          try { await attachAgent(); }
+          catch (_) { /* The local peer agent may start later. */ }
+        }
         const rooms = state.peers.filter((p) => !isOwn(p.username)).slice(0, 12).map((p) => peerRoom(p.username))
           .concat(state.channels.filter((c) => c.joined).slice(0, 12).map((c) => channelRoom(c.id)));
         for (const room of rooms) {
@@ -327,8 +545,7 @@
       }
       setNetwork(true);
     } catch (error) {
-      setNetwork(false);
-      inform(`Không đồng bộ được tin nhắn: ${error.message}`, "error");
+      inform(`Could not sync messages: ${error.message}`, "error");
     } finally { state.polling = false; }
   }
 
@@ -338,17 +555,47 @@
   ui.lookup.addEventListener("click", () => handleAction("lookup"));
   ui.join.addEventListener("click", () => handleAction("join"));
   ui.leave.addEventListener("click", () => handleAction("leave"));
-  ui.invite.addEventListener("click", () => ui.inviteDialog.showModal());
-  $("closeInvite").addEventListener("click", () => ui.inviteDialog.close());
+  function openInviteDialog() {
+    if (typeof ui.inviteDialog.showModal === "function") ui.inviteDialog.showModal();
+    else ui.inviteDialog.setAttribute("open", "");
+  }
+
+  function closeInviteDialog() {
+    if (typeof ui.inviteDialog.close === "function") ui.inviteDialog.close();
+    else ui.inviteDialog.removeAttribute("open");
+  }
+
+  ui.invite.addEventListener("click", async () => {
+    if (!state.selected || state.selected.type !== "channel") return;
+    try {
+      const result = await api("/api/peers");
+      const accounts = ((result && result.peers) || []).filter((peer) =>
+        peer.username && !isOwn(peer.username));
+      ui.inviteAccount.textContent = "";
+      ui.inviteAccount.add(new Option("Choose an account", ""));
+      for (const account of accounts) {
+        ui.inviteAccount.add(new Option(account.username, account.username));
+      }
+      if (!accounts.length) {
+        inform("No other registered accounts to invite.", "error");
+        return;
+      }
+      openInviteDialog();
+    } catch (error) { inform(`Could not load accounts: ${error.message}`, "error"); }
+  });
+  $("closeInvite").addEventListener("click", closeInviteDialog);
   $("inviteForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (state.selected?.type !== "channel") return;
-    const username = ui.inviteUsername.value.trim();
+    if ((state.selected && state.selected.type) !== "channel") return;
+    const username = ui.inviteAccount.value;
     try {
-      await api(`/api/channels/${encodeURIComponent(state.selected.id)}/members`, { method: "POST", body: { username } });
-      ui.inviteUsername.value = "";
-      ui.inviteDialog.close();
-      inform(`Đã gửi yêu cầu mời @${username}. Việc nhận lời mời từ xa cần được kiểm tra trên Peer đó.`, "success");
+      const result = await api(`/api/channels/${encodeURIComponent(state.selected.id)}/members`, { method: "POST", body: { username } });
+      ui.inviteAccount.value = "";
+      closeInviteDialog();
+      inform(result && result.invitation && !result.invitation.added
+        ? `@${username} is already a member.`
+        : state.mode === "server" ? `Added @${username} to the channel.`
+          : `Invitation sent to @${username}; remote delivery must be checked.`, "success");
       await listChannels();
     } catch (error) { inform(error.message, "error"); }
   });
@@ -356,7 +603,7 @@
     event.preventDefault();
     const username = $("dmUsername").value.trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$/.test(username) || isOwn(username)) {
-      inform("Tên Peer không hợp lệ hoặc trùng tài khoản hiện tại.", "error");
+      inform("Invalid peer username or your own account.", "error");
       return;
     }
     selectRoom(peerRoom(username));
@@ -370,15 +617,17 @@
       $("channelName").value = "";
       $("privateChannel").checked = false;
       await listChannels();
-      if (result?.channel?.id) await selectRoom(channelRoom(result.channel.id));
-      inform(`Đã tạo Channel ${name}.`, "success");
+      if (result && result.channel && result.channel.id) await selectRoom(channelRoom(result.channel.id));
+      inform(`Created channel ${name}.`, "success");
     } catch (error) { inform(error.message, "error"); }
   });
   $("messageForm").addEventListener("submit", postMessage);
+  ui.attach.addEventListener("click", () => ui.fileInput.click());
+  ui.fileInput.addEventListener("change", sendFile);
   ui.input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
-      if (!ui.send.disabled) $("messageForm").requestSubmit();
+      if (!ui.send.disabled) postMessage(event);
     }
   });
   ui.input.addEventListener("input", () => { delete ui.input.dataset.pendingId; });
@@ -386,12 +635,12 @@
     try {
       if (!state.csrf) {
         const me = await api("/api/me");
-        state.csrf = me?.csrf_token || "";
+        state.csrf = (me && me.csrf_token) || "";
       }
       await api("/logout", { method: "POST", body: {} });
       state.stopped = true;
       window.location.replace("/login.html");
-    } catch (error) { inform(`Đăng xuất thất bại: ${error.message}`, "error"); }
+    } catch (error) { inform(`Sign out failed: ${error.message}`, "error"); }
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) pollUpdates();
@@ -400,20 +649,29 @@
   async function init() {
     try {
       const me = await api("/api/me");
-      if (!me?.user?.username) throw new Error("/api/me không trả về user.username.");
+      if (!(me && me.user && me.user.username)) throw new Error("/api/me did not return user.username.");
       state.user = me.user;
       state.csrf = me.csrf_token || "";
       ui.user.textContent = `@${state.user.username}`;
       const status = await api("/api/status");
-      state.mode = status?.mode || "unknown";
+      state.mode = (status && status.mode) || "unknown";
+      state.peerTransport = (status && status.peer_transport) || "udp";
+      if (state.mode === "server") {
+        $("peerHeading").textContent = "Accounts";
+        $("dmUsername").placeholder = "Recipient username...";
+        $("inviteHint").textContent = "Choose an account to invite.";
+      }
+      if (state.mode === "server") {
+        try { await attachAgent(); }
+        catch (error) { inform(`P2P unavailable: ${error.message}`, "error"); }
+      }
       await Promise.all([listPeers(), listChannels()]);
       renderConversation();
-      inform(state.mode === "tracker" ? "Đây là Tracker. Muốn nhắn tin P2P hãy mở HTTP Server của Peer." : `Đã đăng nhập @${state.user.username} · mode: ${state.mode}.`, "success");
       window.setInterval(pollUpdates, POLL_MS);
     } catch (error) {
       if (!state.stopped) {
         setNetwork(false);
-        inform(`Khởi tạo không thành công: ${error.message}`, "error");
+        inform(`Initialization failed: ${error.message}`, "error");
       }
     }
   }

@@ -1043,6 +1043,7 @@ class Session:
             packet: Decoded transport packet.
         """
         response = None
+        notify_receive = False
         if packet.flags == HELLO:
             if self._cipher is None:
                 self._cipher = derive_cipher(self._private_key, packet.payload)
@@ -1068,7 +1069,7 @@ class Session:
                       f"data_size={data_size} status={status}")
                 if status in (RECV_STORED, RECV_DUPLICATE):
                     response = self._schedule_ack(packet, status)
-                    self._receive_condition.notify_all()
+                    notify_receive = True
         elif packet.flags == PROBE:
             print(f"[Session] RX PROBE rwnd={packet.rwnd}")
             with self._recv_lock:
@@ -1078,3 +1079,6 @@ class Session:
 
         if response is not None:
             self.send_packet(response)
+        if notify_receive:
+            with self._receive_condition:
+                self._receive_condition.notify_all()

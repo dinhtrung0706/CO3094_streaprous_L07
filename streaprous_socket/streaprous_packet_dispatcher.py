@@ -31,18 +31,17 @@ _packet_queues = {}
 _packet_dispatcher_thread = None
 _packet_dispatcher_running = False
 _packet_dispatcher_lock = threading.Lock()
-_current_listen_port = None
+_listen_ports = set()
 _current_raw_socket = None
 
 _SYN_KEY = ("SYN", None)
 
 
-def _packet_dispatcher(s, listen_port):
+def _packet_dispatcher(s):
     """Read raw IPv4/TCP packets and route them to connection queues.
 
     Args:
-        s: Raw socket object supporting ``recvfrom``.
-        listen_port: Local TCP port number to filter incoming packets.
+        s: Raw socket used to receive incoming packets.
     """
     global _packet_dispatcher_running
 
@@ -89,8 +88,9 @@ def _packet_dispatcher(s, listen_port):
                     continue
 
                 src_port, dest_port = struct.unpack("!HH", tcp[:4])
-                if dest_port != listen_port:
-                    continue
+                with _packet_dispatcher_lock:
+                    if dest_port not in _listen_ports:
+                        continue
 
                 flags = tcp[13]
                 is_syn = bool(flags & 0x02) and not bool(flags & 0x10)
@@ -108,7 +108,7 @@ def _packet_dispatcher(s, listen_port):
                         )
                     elif is_syn:
                         target = _packet_queues.setdefault(
-                            _SYN_KEY,
+                            (_SYN_KEY[0], dest_port),
                             queue.Queue(maxsize=DEFAULT_QUEUE_MAXSIZE),
                         )
                         print(
@@ -138,56 +138,42 @@ def _packet_dispatcher(s, listen_port):
 
 
 def start_packet_dispatcher(s, listen_port):
-    """Start or restart the background packet dispatcher thread.
+    """Register a port with the shared RAW packet dispatcher.
 
     Args:
         s: Raw socket used to receive incoming packets.
-        listen_port: Local TCP port number to filter incoming packets.
+        listen_port: Local TCP port number to receive SYN packets on.
     """
     global _packet_dispatcher_thread
     global _packet_dispatcher_running
-    global _current_listen_port
     global _current_raw_socket
 
-    old_thread = None
     with _packet_dispatcher_lock:
-        if (
-            _packet_dispatcher_running
-            and _packet_dispatcher_thread is not None
-            and _packet_dispatcher_thread.is_alive()
-        ):
-            if s is _current_raw_socket and listen_port == _current_listen_port:
-                return
-            _packet_dispatcher_running = False
-            old_thread = _packet_dispatcher_thread
-            _packet_dispatcher_thread = None
-
-    if (
-        old_thread is not None
-        and old_thread.is_alive()
-        and old_thread is not threading.current_thread()
-    ):
-        old_thread.join(timeout=2.0)
-
-    with _packet_dispatcher_lock:
+        added = listen_port not in _listen_ports
+        _listen_ports.add(listen_port)
+        if (_packet_dispatcher_running and _packet_dispatcher_thread is not None
+                and _packet_dispatcher_thread.is_alive()):
+            if added:
+                print("[Sock_dispatcher] Registered port {} (ports {})".format(
+                    listen_port, sorted(_listen_ports)))
+            return
         _packet_dispatcher_running = True
         _current_raw_socket = s
-        _current_listen_port = listen_port
         _packet_dispatcher_thread = threading.Thread(
             target=_packet_dispatcher,
-            args=(s, listen_port),
+            args=(s,),
             daemon=True,
-            name=f"packet-dispatcher-{listen_port}",
+            name="packet-dispatcher",
         )
         _packet_dispatcher_thread.start()
-        print(f"[Sock_dispatcher] Start dispatching packet for port {listen_port}")
+        print("[Sock_dispatcher] Start dispatching packets for ports {}".format(
+            sorted(_listen_ports)))
 
 
 def stop_packet_dispatcher():
-    """Stop the running packet dispatcher thread and reset state."""
+    """Stop the process-wide RAW packet reader and clear registered ports."""
     global _packet_dispatcher_running
     global _packet_dispatcher_thread
-    global _current_listen_port
     global _current_raw_socket
 
     with _packet_dispatcher_lock:
@@ -195,7 +181,7 @@ def stop_packet_dispatcher():
         thread = _packet_dispatcher_thread
         _packet_dispatcher_thread = None
         _current_raw_socket = None
-        _current_listen_port = None
+        _listen_ports.clear()
 
     if (
         thread is not None
@@ -209,7 +195,7 @@ def get_packet_queue(client_key):
     """Return or create the packet queue for a connection key.
 
     Args:
-        client_key: ``(client_ip, client_port)`` or ``_SYN_KEY`` tuple.
+        client_key: ``(client_ip, client_port)`` or ``("SYN", listen_port)``.
 
     Returns:
         A bounded ``queue.Queue`` instance for ``client_key``.
@@ -224,7 +210,7 @@ def remove_packet_queue(client_key):
     """Remove the packet queue associated with ``client_key``.
 
     Args:
-        client_key: ``(client_ip, client_port)`` or ``_SYN_KEY`` tuple.
+        client_key: ``(client_ip, client_port)`` or ``("SYN", listen_port)``.
     """
     with _packet_dispatcher_lock:
         _packet_queues.pop(client_key, None)

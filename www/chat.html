@@ -1,65 +1,67 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Trò chuyện | StreapRous Chat</title>
+  <title>Chat | StreapRous Chat</title>
   <link rel="stylesheet" href="/static/css/chat.css">
   <script src="/static/js/chat.js" defer></script>
 </head>
 <body class="chat-page">
   <div class="app-shell">
     <header class="app-header">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">SR</span><div><strong>StreapRous Chat</strong><small>Hybrid Client–Server · P2P</small></div></div>
-      <div class="header-right"><span class="connection-indicator" id="networkState" role="status">Đang kết nối…</span><span class="user-chip" id="currentUser">Đang xác thực…</span><button class="button quiet" id="logoutButton" type="button">Đăng xuất</button></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">SR</span><strong>StreapRous Chat</strong></div>
+      <div class="header-right"><span class="user-chip"><span class="connection-indicator" id="networkState" role="status" aria-label="Connecting" title="Connecting"></span><span id="currentUser">...</span></span><button class="button quiet" id="logoutButton" type="button">Sign out</button></div>
     </header>
     <div class="app-layout">
-      <aside class="sidebar" aria-label="Điều hướng hội thoại">
+      <aside class="sidebar" aria-label="Conversations">
         <section class="side-section">
-          <div class="section-heading"><h2>Peer đang hoạt động</h2><button type="button" class="button small quiet" id="refreshPeers">Làm mới</button></div>
-          <div id="peerList" class="item-list" aria-label="Danh sách Peer"><p class="empty-small">Đang tải danh sách Peer…</p></div>
+          <div class="section-heading"><h2 id="peerHeading">Active peers</h2><button type="button" class="button small quiet" id="refreshPeers">Refresh</button></div>
+          <div id="peerList" class="item-list" aria-label="Peer list"><p class="empty-small">Loading peers…</p></div>
           <form id="openDmForm" class="inline-form" autocomplete="off">
-            <label for="dmUsername" class="sr-only">Tên Peer muốn nhắn riêng</label>
-            <input id="dmUsername" maxlength="32" placeholder="Tên Peer cần nhắn..." required>
-            <button class="button small" type="submit">Mở chat</button>
+            <label for="dmUsername" class="sr-only">Direct message recipient</label>
+            <input id="dmUsername" maxlength="32" placeholder="Recipient username..." required>
+            <button class="button small" type="submit">Open chat</button>
           </form>
-          <p class="section-hint">Peer online được cập nhật từ Tracker. Có thể mở hội thoại theo username.</p>
         </section>
         <section class="side-section channel-section">
-          <div class="section-heading"><h2>Channels</h2><button type="button" class="button small quiet" id="refreshChannels">Làm mới</button></div>
-          <div id="channelList" class="item-list" aria-label="Danh sách Channel"><p class="empty-small">Đang tải Channels…</p></div>
+          <div class="section-heading"><h2>Channels</h2><button type="button" class="button small quiet" id="refreshChannels">Refresh</button></div>
+          <div id="channelList" class="item-list" aria-label="Channel list"><p class="empty-small">Loading channels…</p></div>
           <form id="createChannelForm" class="channel-form">
-            <label for="channelName">Tạo Channel</label>
-            <div class="inline-form"><input id="channelName" maxlength="32" placeholder="Tên Channel" required><button class="button small" type="submit">Tạo</button></div>
-            <label class="checkline"><input id="privateChannel" type="checkbox"> Channel riêng tư</label>
+            <label for="channelName">Create channel</label>
+            <div class="inline-form"><input id="channelName" maxlength="32" placeholder="Channel name" required><button class="button small" type="submit">Create</button></div>
+            <label class="checkline"><input id="privateChannel" type="checkbox"> Private channel</label>
           </form>
         </section>
       </aside>
       <main class="chat-main" aria-labelledby="conversationTitle">
         <div class="conversation-header">
-          <div class="conversation-identity"><p id="conversationType" class="eyebrow">HỘI THOẠI</p><h1 id="conversationTitle">Chọn Peer hoặc Channel</h1><p id="conversationSubtitle" class="subtle">Chọn một mục ở cột trái để bắt đầu.</p></div>
-          <div class="conversation-actions"><button id="lookupPeerButton" class="button small" type="button" hidden>Tra cứu địa chỉ</button><button id="joinChannelButton" class="button small" type="button" hidden>Tham gia</button><button id="leaveChannelButton" class="button small" type="button" hidden>Rời Channel</button><button id="inviteButton" class="button small" type="button" hidden>Mời thành viên</button><button id="refreshMessages" class="button small quiet" type="button" disabled>Làm mới tin</button></div>
+          <div class="conversation-identity"><h1 id="conversationTitle">Select a conversation</h1><p id="conversationSubtitle" class="subtle"></p></div>
+          <div class="conversation-actions"><button id="lookupPeerButton" class="button small" type="button" hidden>Find address</button><button id="joinChannelButton" class="button small" type="button" hidden>Join</button><button id="leaveChannelButton" class="button small" type="button" hidden>Leave channel</button><button id="inviteButton" class="button small" type="button" hidden>Invite member</button><button id="refreshMessages" class="button small quiet" type="button" disabled>Refresh messages</button></div>
         </div>
-        <div id="messages" class="messages" role="log" aria-label="Lịch sử tin nhắn" aria-live="off" tabindex="0"><p class="empty-chat">Chưa chọn hội thoại.</p></div>
+        <div id="messages" class="messages" role="log" aria-label="Message history" aria-live="off" tabindex="0"><p class="empty-chat">No conversation selected.</p></div>
         <div class="compose-area">
           <form id="messageForm" class="compose-form">
-            <label class="sr-only" for="messageInput">Nội dung tin nhắn</label>
-            <textarea id="messageInput" rows="2" placeholder="Nhập tin nhắn… (Enter để gửi, Shift+Enter xuống dòng)" disabled required></textarea>
-            <button id="sendButton" class="button primary" type="submit" disabled>Gửi tin</button>
+            <button id="attachButton" class="button attach-button" type="button" title="Attach and send a file" aria-label="Attach and send a file" hidden>📎</button>
+            <input id="fileInput" type="file" hidden disabled>
+            <label class="sr-only" for="messageInput">Message text</label>
+            <textarea id="messageInput" rows="2" placeholder="Message..." disabled required></textarea>
+            <button id="sendButton" class="button primary" type="submit" disabled>Send</button>
           </form>
-          <p class="delivery-note">Gửi thành công = Backend đã nhận và lưu/yêu cầu chuyển tiếp, <strong>không phải</strong> Peer bên kia đã xác nhận nhận tin.</p>
+          <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
         </div>
       </main>
     </div>
-    <footer class="app-footer"><p id="notice" class="notice" role="status" aria-live="polite">Đang kết nối tới Backend…</p><span>Polling mỗi 4 giây · Không dùng Demo Mode</span></footer>
   </div>
   <dialog id="inviteDialog" class="invite-dialog">
     <form id="inviteForm">
-      <h2>Mời thành viên vào Channel</h2>
-      <p class="subtle">Chỉ chủ Channel được mời. Thành viên được mời cần có tài khoản trên Peer của mình.</p>
-      <label for="inviteUsername">Username</label>
-      <input id="inviteUsername" required maxlength="32" placeholder="Ví dụ: bob">
-      <div class="dialog-actions"><button type="button" class="button quiet" id="closeInvite">Hủy</button><button type="submit" class="button primary">Gửi lời mời</button></div>
+      <h2>Invite channel member</h2>
+      <p class="subtle" id="inviteHint">Only the channel owner can invite members.</p>
+      <label for="inviteAccount">Registered account</label>
+      <select id="inviteAccount" required>
+        <option value="">Choose an account</option>
+      </select>
+      <div class="dialog-actions"><button type="button" class="button quiet" id="closeInvite">Cancel</button><button type="submit" class="button primary">Invite member</button></div>
     </form>
   </dialog>
 </body>
