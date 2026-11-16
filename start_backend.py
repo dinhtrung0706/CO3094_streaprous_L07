@@ -121,6 +121,7 @@ def setup_rst_block(ip, port):
     Block RST packets from the kernel to allow raw socket server to handle connections properly.
     On macOS use pfctl, on Linux use iptables.
     """
+    print(f"[BACKEND RST BLOCK] Drop RST at {ip}:{port}")
     if platform.system() == "Darwin":
         subprocess.run([
             "pfctl", "-t", "raw_socket_block", "-T", "add", f"port {port}"
@@ -129,14 +130,29 @@ def setup_rst_block(ip, port):
             "pfctl", "-a", "com.apple/250.RawSocketBlock", "-f", "-"
         ], input=f"block drop out quick proto tcp from any port {port} to any flags R/R\n".encode(), check=False)
     else:
-        subprocess.run([
-            "iptables",
-            "-A", "OUTPUT",
+        rule = [
             "-p", "tcp",
             "--sport", str(port),
             "--tcp-flags", "RST", "RST",
-            "-j", "DROP"
-        ], check=False)
+            "-j", "DROP",
+        ]
+        check = subprocess.run(
+            ["iptables", "-C", "OUTPUT"] + rule,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if check.returncode == 0:
+            return
+
+        # Insert before existing OUTPUT rules, otherwise it takes precedence.
+        subprocess.run(
+            ["iptables", "-I", "OUTPUT", "1"] + rule,
+            check=True,
+        )
+        subprocess.run(
+            ["iptables", "-C", "OUTPUT"] + rule,
+            check=True,
+        )
+        print("[Backend] Blocking kernel TCP RST from port {}".format(port))
 
 
 def parse_arguments():

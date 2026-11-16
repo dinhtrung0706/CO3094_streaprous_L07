@@ -307,7 +307,8 @@ class HttpAdapter:
         from transport.connection import Connection
         from transport.session import Session
         from .session_http import (
-            REQUEST_ID, RESPONSE_ID, receive_message, send_message,
+            REQUEST_ID, RESPONSE_ID, SESSION_HTTP_MAX_REQUESTS,
+            TRANSFER_ID_STRIDE, receive_message, send_message,
         )
 
         conn = Connection(
@@ -316,40 +317,45 @@ class HttpAdapter:
             rwnd=config.SESSION_RWND, handshake_rtt=config.SESSION_RTT
         )
         session = Session(conn, max_retries=config.SESSION_MAX_RETRIES)
-        reader = _BufferedReader(lambda: receive_message(session, REQUEST_ID))
-        response = None
         try:
-            try:
-                request = self.read_request(reader)
-            except HTTPError as exc:
-                send_message(session, self._error_payload(None, exc), RESPONSE_ID)
-                return
-            except Exception as exc:
-                logger.exception("Unhandled raw request read error")
-                send_message(session, self._error_payload(None, exc), RESPONSE_ID)
-                return
-
-            if request is None:
-                return
-            self.request = request
-
-            try:
-                response = self.dispatch(request)
-                response.keep_alive = False
-                payload = response.build_response(request)
-            except HTTPError as exc:
-                payload = self._error_payload(request, exc)
-            except Exception:
-                logger.exception(
-                    "Unhandled raw dispatch error for %s %s",
-                    request.method,
-                    request.path,
+            for index in range(SESSION_HTTP_MAX_REQUESTS):
+                request_id = REQUEST_ID + index * TRANSFER_ID_STRIDE
+                response_id = RESPONSE_ID + index * TRANSFER_ID_STRIDE
+                reader = _BufferedReader(
+                    lambda transfer_id=request_id: receive_message(session, transfer_id)
                 )
-                payload = self._error_payload(request, RuntimeError())
+                response = None
+                try:
+                    request = self.read_request(reader)
+                except HTTPError as exc:
+                    send_message(session, self._error_payload(None, exc), response_id)
+                    break
+                except Exception as exc:
+                    logger.exception("Unhandled raw request read error")
+                    send_message(session, self._error_payload(None, exc), response_id)
+                    break
 
-            self.response = response
-            if payload:
-                send_message(session, payload, RESPONSE_ID)
+                if request is None:
+                    break
+                self.request = request
+
+                try:
+                    response = self.dispatch(request)
+                    response.keep_alive = False
+                    payload = response.build_response(request)
+                except HTTPError as exc:
+                    payload = self._error_payload(request, exc)
+                except Exception:
+                    logger.exception(
+                        "Unhandled raw dispatch error for %s %s",
+                        request.method,
+                        request.path,
+                    )
+                    payload = self._error_payload(request, RuntimeError())
+
+                self.response = response
+                if not payload or not send_message(session, payload, response_id):
+                    break
         finally:
             session.abort()
             close_connection(raw_socket, conn_info)

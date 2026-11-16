@@ -28,6 +28,7 @@ class Database:
         if self.path != ":memory:":
             self._connection.execute("PRAGMA journal_mode = WAL")
         self._create_schema()
+        self._ensure_channel_name_constraints()
 
     def _create_schema(self):
         with self._lock, self._connection:
@@ -55,7 +56,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS channels (
                     id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    name TEXT NOT NULL COLLATE NOCASE,
                     owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     created_at INTEGER NOT NULL
                 );
@@ -73,6 +74,61 @@ class Database:
             )
             self._ensure_messages()
             self._migrate_schema()
+
+    def _ensure_channel_name_constraints(self):
+        """Allow private channel names to repeat under different owners."""
+        with self._lock:
+            definition = self._connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'channels'"
+            ).fetchone()[0]
+            if "NAME TEXT NOT NULL COLLATE NOCASE UNIQUE" in definition.upper():
+                self._connection.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    with self._connection:
+                        self._connection.execute(
+                            """CREATE TABLE channels_new (
+                                id TEXT PRIMARY KEY,
+                                name TEXT NOT NULL COLLATE NOCASE,
+                                owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                                created_at INTEGER NOT NULL,
+                                is_private INTEGER NOT NULL DEFAULT 0
+                                    CHECK (is_private IN (0, 1)),
+                                owner_name TEXT NOT NULL DEFAULT ''
+                            )"""
+                        )
+                        self._connection.execute(
+                            """INSERT INTO channels_new
+                               (id, name, owner_id, created_at, is_private, owner_name)
+                               SELECT id, name, owner_id, created_at,
+                                      is_private, owner_name FROM channels"""
+                        )
+                        self._connection.execute("DROP TABLE channels")
+                        self._connection.execute(
+                            "ALTER TABLE channels_new RENAME TO channels"
+                        )
+                        self._create_channel_name_indexes()
+                        if self._connection.execute(
+                            "PRAGMA foreign_key_check"
+                        ).fetchone() is not None:
+                            raise sqlite3.IntegrityError(
+                                "channel migration violated foreign keys"
+                            )
+                finally:
+                    self._connection.execute("PRAGMA foreign_keys = ON")
+            else:
+                with self._connection:
+                    self._create_channel_name_indexes()
+
+    def _create_channel_name_indexes(self):
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS channels_public_name_idx "
+            "ON channels(name) WHERE is_private = 0"
+        )
+        self._connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS channels_private_owner_name_idx "
+            "ON channels(owner_name COLLATE NOCASE, name) WHERE is_private = 1"
+        )
 
     def _columns(self, table):
         with self._lock:
@@ -97,6 +153,15 @@ class Database:
                     PRIMARY KEY (username, ip, port)
                 )"""
                 )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS peer_identity (id INTEGER PRIMARY KEY "
+                "CHECK (id = 1), private_key BLOB NOT NULL)"
+            )
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS peer_keys ("
+                "username TEXT PRIMARY KEY COLLATE NOCASE, "
+                "public_key BLOB NOT NULL)"
+            )
             self._ensure_direct_messages()
             user_columns = self._columns("users")
             if "digest_ha1" not in user_columns:
@@ -244,6 +309,52 @@ class Database:
             record["digest_ha1"] = row["digest_ha1"]
         return record
 
+    def get_identity_key(self):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT private_key FROM peer_identity WHERE id = 1"
+            ).fetchone()
+        return bytes(row["private_key"]) if row else None
+
+    def save_identity_key(self, private_key):
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO peer_identity (id, private_key) "
+                "VALUES (1, ?)", (bytes(private_key),)
+            )
+            return self.get_identity_key()
+
+    def get_peer_key(self, username):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT public_key FROM peer_keys WHERE username = ? "
+                "COLLATE NOCASE", (username,)
+            ).fetchone()
+        return bytes(row["public_key"]) if row else None
+
+    def pin_peer_key(self, username, public_key):
+        """Remember a public key, refusing silent identity-key replacement."""
+        public_key = bytes(public_key)
+        if len(public_key) != 32:
+            return False
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO peer_keys (username, public_key) "
+                "VALUES (?, ?)", (username, public_key)
+            )
+            return self.get_peer_key(username) == public_key
+
+    def authorize_peer_key(self, username, public_key):
+        """Bind an active peer key to a centrally authenticated account."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO peer_keys (username, public_key) "
+                "VALUES (?, ?)", (username, public_key)
+            )
+            self._connection.execute(
+                "DELETE FROM peers WHERE username = ? COLLATE NOCASE", (username,)
+            )
+
     def create_user(self, username, password_hash, salt, iterations, created_at,
                     digest_ha1=None):
         with self._lock, self._connection:
@@ -282,6 +393,17 @@ class Database:
                 (username,),
             ).fetchone()
         return self._user_record(row)
+
+    def list_users(self, exclude=None):
+        """Return account usernames without exposing credentials or sessions."""
+        query = "SELECT username FROM users"
+        params = []
+        if exclude is not None:
+            query += " WHERE username <> ? COLLATE NOCASE"
+            params.append(exclude)
+        query += " ORDER BY username COLLATE NOCASE"
+        with self._lock:
+            return self._rows(self._connection.execute(query, params))
 
     def get_user_by_id(self, user_id):
         with self._lock:
@@ -401,11 +523,19 @@ class Database:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def get_channel_by_name(self, name):
+    def get_channel_by_name(self, name, *, is_private=False, owner_name=None):
         with self._lock:
-            row = self._connection.execute(
-                "SELECT * FROM channels WHERE name = ? COLLATE NOCASE", (name,)
-            ).fetchone()
+            if is_private:
+                row = self._connection.execute(
+                    """SELECT * FROM channels WHERE name = ? COLLATE NOCASE
+                       AND is_private = 1 AND owner_name = ? COLLATE NOCASE""",
+                    (name, owner_name),
+                ).fetchone()
+            else:
+                row = self._connection.execute(
+                    """SELECT * FROM channels WHERE name = ? COLLATE NOCASE
+                       AND is_private = 0""", (name,)
+                ).fetchone()
         return dict(row) if row is not None else None
 
     def list_channels(self, user_id):

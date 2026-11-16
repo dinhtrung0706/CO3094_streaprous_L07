@@ -12,7 +12,7 @@
   const params = new URLSearchParams(window.location.search);
 
   if (mode === "login" && params.get("registered") === "1") {
-    status.textContent = "Tạo tài khoản thành công. Hãy đăng nhập.";
+    status.textContent = "Account created. Please sign in.";
     status.dataset.kind = "success";
     username.value = params.get("username") || "";
   }
@@ -27,15 +27,15 @@
     const name = username.value.trim();
     const pwd = password.value;
     if (mode === "register" && confirm.value !== pwd) {
-      show("Mật khẩu xác nhận không trùng khớp.");
+      show("Passwords do not match.");
       return;
     }
     if (mode === "register" && new TextEncoder().encode(pwd).length < 8) {
-      show("Mật khẩu cần ít nhất 8 byte UTF-8.");
+      show("Password must contain at least 8 UTF-8 bytes.");
       return;
     }
     submit.disabled = true;
-    show("Đang xử lý…", "info");
+    show("Processing…", "info");
     try {
       const response = await fetch(mode === "register" ? "/register" : "/login", {
         method: "POST",
@@ -53,7 +53,7 @@
         window.location.replace("/chat.html");
       }
     } catch (error) {
-      show(error.message || "Không kết nối được Backend.");
+      show(error.message || "Could not connect to the backend.");
       submit.disabled = false;
     }
   });

@@ -1,14 +1,19 @@
 """Chat app: JSON control plane plus the UDP peer node."""
 
+import base64
 import functools
 import json
 import os
+import secrets
+import threading
 import time
 
 from daemon.auth import install_auth
 from daemon.chat import ChatService
+from daemon.file_transfer import FileStore, UPLOAD_CHUNK_BYTES
 from daemon.errors import BadRequest, HTTPError
 from daemon.peer import PeerNode
+from daemon.peer_crypto import decode_key
 from daemon.response import Response
 from daemon.streaprous import StreapRous
 
@@ -66,6 +71,7 @@ def _peer_authorized(auth, request):
         request.headers.get("X-StreapRous-Time", ""),
         request.headers.get("X-StreapRous-Signature", ""),
         request.body,
+        request.path,
     ):
         return False
     try:
@@ -85,65 +91,104 @@ def build_chatapp(
     tracker=None,
     db_path=None,
     udp_port=0,
+    peer_transport="raw",
+    raw_port=9200,
     public_ip=None,
     username=None,
     heartbeat=5.0,
     install_peer=True,
     password_iterations=None,
-    peer_secret=None,
     http_port=0,
 ):
     """Create the app, wire services and register every chat route."""
     mode = (mode or "peer").lower()
-    if mode not in ("peer", "tracker", "local"):
-        raise ValueError("mode must be 'peer', 'tracker' or 'local'")
-    configured_peer_secret = peer_secret or os.environ.get(
-        "STREAPROUS_PEER_SECRET"
-    )
-    if mode != "local" and install_peer and (
-        not configured_peer_secret or len(configured_peer_secret.encode()) < 32
-    ):
-        raise ValueError(
-            "networked peer/tracker mode requires STREAPROUS_PEER_SECRET "
-            "with at least 32 bytes"
-        )
-
+    if mode not in ("peer", "tracker", "local", "server"):
+        raise ValueError("mode must be 'peer', 'tracker', 'local' or 'server'")
     app = StreapRous()
     auth = install_auth(
         app,
         db_path or DEFAULT_DB,
         password_iterations=password_iterations,
-        peer_secret=peer_secret,
     )
     chat = ChatService(auth.database)
+    channel_files = FileStore(db_path or DEFAULT_DB) if mode == "server" else None
     app._streaprous_chat = chat
     app._streaprous_auth = auth
 
     peer = None
     if install_peer and mode != "local":
-        node_user = username or ("tracker" if mode == "tracker" else None)
+        node_user = "tracker" if mode in ("tracker", "server") else username
         if not node_user:
             raise ValueError("username is required for peer mode")
         peer = PeerNode(
             chat,
             username=node_user,
-            token=auth.issue_peer_token(node_user, ttl=24 * 3600),
-            verifier=auth.verify_peer_token,
-            role="tracker" if mode == "tracker" else "peer",
+            role="tracker" if mode in ("tracker", "server") else "peer",
             udp_port=udp_port,
+            peer_transport=peer_transport,
+            raw_port=raw_port,
             public_ip=public_ip,
             tracker=tracker,
             heartbeat=heartbeat,
             http_port=http_port,
             auth=auth,
+            require_claimed_identity=(mode == "server"),
         )
         peer.start()
     app._streaprous_peer = peer
     app._streaprous_mode = mode
+    app._streaprous_peer_transport = peer_transport
+
+    if mode == "server":
+        @app.route("/", methods=["GET"])
+        def home(request):
+            return Response().redirect("/login.html")
 
     @app.route("/api/status", methods=["GET"])
     def status(request):
-        return {"mode": mode}
+        return {"mode": mode, "peer_transport": peer_transport if peer else None}
+
+    agent_tickets = {}
+    agent_ticket_lock = threading.Lock()
+
+    @app.route("/api/agent/ticket", methods=["POST"], auth=True)
+    @_api
+    def issue_agent_ticket(request):
+        if mode != "server":
+            raise BadRequest("agent tickets require central server mode")
+        data = _json_object(request)
+        try:
+            public = decode_key(data.get("public_key"), 32)
+        except ValueError:
+            raise BadRequest("invalid peer public key")
+        ticket = secrets.token_urlsafe(32)
+        with agent_ticket_lock:
+            agent_tickets[ticket] = (request.user["username"], time.time() + 60,
+                                     public)
+        return {"ticket": ticket}
+
+    @app.route("/api/agent/claim", methods=["POST"])
+    @_api
+    def claim_agent_ticket(request):
+        if mode != "server":
+            raise BadRequest("agent registration requires central server mode")
+        data = _json_object(request)
+        ticket = data.get("ticket")
+        if not isinstance(ticket, str):
+            raise BadRequest("invalid agent ticket")
+        try:
+            public = decode_key(data.get("public_key"), 32)
+        except ValueError:
+            raise BadRequest("invalid peer public key")
+        with agent_ticket_lock:
+            identity = agent_tickets.pop(ticket, None)
+        if identity is None or identity[1] < time.time() or identity[2] != public:
+            return Response().json({"error": "expired or invalid ticket"}, status=401)
+        username = identity[0]
+        if auth.database.get_user(username) is None:
+            return Response().json({"error": "user no longer exists"}, status=401)
+        auth.database.authorize_peer_key(username, public)
+        return {"username": username}
 
     @app.route("/api/channels", methods=["GET"], auth=True)
     @_api
@@ -166,6 +211,8 @@ def build_chatapp(
             return Response().json(
                 {"error": "channel already exists"}, status=409
             )
+        if peer is not None and mode != "server":
+            peer.announce_channel(channel)
         return Response().json({"channel": channel}, status=201)
 
     @app.route("/api/channels/{channel_id}/join", methods=["POST"], auth=True)
@@ -211,7 +258,9 @@ def build_chatapp(
         recipient = data.get("to") or "*"
         sender = request.user["username"]
 
-        if peer is not None:
+        if mode == "server" and recipient != "*":
+            raise BadRequest("direct messages must use the local peer agent")
+        if peer is not None and mode != "server":
             try:
                 if recipient == "*":
                     message = peer.broadcast(
@@ -237,9 +286,82 @@ def build_chatapp(
             )
         return Response().json({"message": message}, status=201)
 
+    @app.route("/api/channels/{channel_id}/files", methods=["GET"], auth=True)
+    @_api
+    def list_channel_files(request):
+        channel_id = request.path_params["channel_id"]
+        chat.require_member(channel_id, request.user)
+        if channel_files is None:
+            raise BadRequest("central channel file storage is unavailable")
+        return {"files": channel_files.list_channel(channel_id)}
+
+    @app.route("/api/channels/{channel_id}/files", methods=["POST"], auth=True)
+    @_api
+    def begin_channel_file(request):
+        channel_id = request.path_params["channel_id"]
+        chat.require_member(channel_id, request.user)
+        if channel_files is None:
+            raise BadRequest("central channel file storage is unavailable")
+        data = _json_object(request)
+        record = channel_files.start_upload(request.user["username"], channel_id,
+                                            data.get("name"), data.get("size"))
+        return Response().json({"file": record}, status=201)
+
+    @app.route("/api/channels/{channel_id}/files/{transfer_id}/chunks",
+               methods=["PUT"], auth=True)
+    @_api
+    def upload_channel_chunk(request):
+        channel_id = request.path_params["channel_id"]
+        chat.require_member(channel_id, request.user)
+        if channel_files is None:
+            raise BadRequest("central channel file storage is unavailable")
+        data = _json_object(request)
+        written = channel_files.append_upload(
+            request.path_params["transfer_id"], request.user["username"],
+            channel_id, data.get("index"), data.get("data"))
+        return {"received": written}
+
+    @app.route("/api/channels/{channel_id}/files/{transfer_id}/complete",
+               methods=["POST"], auth=True)
+    @_api
+    def finish_channel_file(request):
+        channel_id = request.path_params["channel_id"]
+        chat.require_member(channel_id, request.user)
+        if channel_files is None:
+            raise BadRequest("central channel file storage is unavailable")
+        record = channel_files.finish_upload(
+            request.path_params["transfer_id"], request.user["username"],
+            channel_id, status="received")
+        return {"file": record}
+
+    @app.route("/api/channels/{channel_id}/files/{transfer_id}/chunks",
+               methods=["GET"], auth=True)
+    @_api
+    def download_channel_chunk(request):
+        channel_id = request.path_params["channel_id"]
+        chat.require_member(channel_id, request.user)
+        if channel_files is None:
+            raise BadRequest("central channel file storage is unavailable")
+        transfer_id = request.path_params["transfer_id"]
+        record = channel_files.get_channel(transfer_id, channel_id)
+        if record is None:
+            return Response().json({"error": "file not found"}, status=404)
+        raw = (request.query.get("index") or ["0"])[0]
+        try:
+            index = int(raw)
+        except (ValueError, TypeError) as exc:
+            raise BadRequest("invalid chunk index") from exc
+        total = max(1, (record["size"] + UPLOAD_CHUNK_BYTES - 1) // UPLOAD_CHUNK_BYTES)
+        if index < 0 or index >= total:
+            raise BadRequest("invalid chunk index")
+        chunk = channel_files.read_chunk(transfer_id, index)
+        return {"data": base64.b64encode(chunk).decode("ascii"), "index": index}
+
     @app.route("/api/peers/heartbeat", methods=["POST"], auth=True)
     @_api
     def peer_heartbeat(request):
+        if mode == "server":
+            raise BadRequest("central peers must register over the P2P transport")
         data = _json_object(request)
         chat.register_peer(
             request.user["username"],
@@ -255,11 +377,15 @@ def build_chatapp(
     @_api
     def invite_channel_member(request):
         data = _json_object(request)
+        invited = data.get("username")
+        if (mode == "server" and isinstance(invited, str) and
+                auth.database.get_user(invited) is None):
+            return Response().json({"error": "user not found"}, status=404)
         result = chat.invite_member(
             request.path_params["channel_id"], request.user,
             data.get("username"),
         )
-        if peer is not None:
+        if peer is not None and mode != "server":
             peer.invite(result["channel_id"], result["username"])
         return Response().json({"invitation": result}, status=201)
 
@@ -273,6 +399,8 @@ def build_chatapp(
             request.user["username"].casefold(), other.casefold()
         ):
             return Response().json({"error": "forbidden"}, status=403)
+        if mode == "server":
+            raise BadRequest("direct messages require the local peer agent")
         rows = chat.direct_messages(
             request.user["username"], other, _since(request), _limit(request)
         )
@@ -286,6 +414,8 @@ def build_chatapp(
     def post_direct_message(request):
         other = request.path_params["username"]
         data = _json_object(request)
+        if mode == "server":
+            raise BadRequest("direct messages require the local peer agent")
         if peer is not None:
             message = peer.send_direct_chat(
                 other, data.get("body", ""),
@@ -388,6 +518,16 @@ def build_chatapp(
     @app.route("/api/peers", methods=["GET"], auth=True)
     @_api
     def get_peers(request):
+        if mode == "server":
+            online = {item["username"].casefold(): item for item in chat.peers()}
+            peers = auth.database.list_users(request.user["username"])
+            for item in peers:
+                active = online.get(item["username"].casefold())
+                item["online"] = active is not None
+                if active:
+                    item["ip"] = active["ip"]
+                    item["port"] = active["port"]
+            return {"peers": peers}
         return {"peers": chat.peers(exclude=peer.username if peer else None)}
 
     @app.route("/get-list", methods=["GET"])
@@ -398,6 +538,8 @@ def build_chatapp(
     @app.route("/submit-info", methods=["POST"], auth=True)
     @_api
     def submit_info(request):
+        if mode == "server":
+            raise BadRequest("central peers must register over the P2P transport")
         data = _json_object(request)
         record = chat.register_peer(
             request.user["username"],

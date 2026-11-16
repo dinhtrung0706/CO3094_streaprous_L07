@@ -3,6 +3,7 @@
 Header (big endian): magic "SR", version, type, seq, ack, window, length.
 """
 
+import base64
 import json
 import struct
 import time
@@ -20,6 +21,8 @@ MAX_BODY_BYTES = 8 * 1024
 # Frame types.
 HELLO = 1
 HELLO_ACK = 2
+HELLO_CHALLENGE = 5
+HELLO_PROOF = 6
 PING = 3
 PONG = 4
 AUTH_ERR = 7
@@ -30,6 +33,8 @@ BYE = 14
 TYPE_NAMES = {
     HELLO: "HELLO",
     HELLO_ACK: "HELLO_ACK",
+    HELLO_CHALLENGE: "HELLO_CHALLENGE",
+    HELLO_PROOF: "HELLO_PROOF",
     PING: "PING",
     PONG: "PONG",
     AUTH_ERR: "AUTH_ERR",
@@ -215,7 +220,7 @@ def validate_envelope(value):
         raise ProtocolError("envelope to must be a non-empty string")
 
     kind = value.get("kind", "channel")
-    if kind not in ("channel", "direct", "invite"):
+    if kind not in ("channel", "direct", "invite", "announce", "file"):
         raise ProtocolError("envelope kind is unsupported")
     return {
         "id": message_id,
@@ -231,17 +236,18 @@ def validate_envelope(value):
     }
 
 
-def hello(username, ip, port, token, *, seq=0, window=DEFAULT_WINDOW):
+def hello(username, ip, port, public_key, *, seq=0, window=DEFAULT_WINDOW):
     return Frame.with_json(
         HELLO,
-        {"username": username, "ip": ip, "port": int(port), "token": token},
+        {"username": username, "ip": ip, "port": int(port),
+         "public_key": public_key},
         seq=seq,
         window=window,
     )
 
 
-def ping(username, token, *, ip=None, port=None):
-    payload = {"username": username, "token": token}
+def ping(username, proof, *, ip=None, port=None):
+    payload = {"username": username, "proof": proof}
     if ip:
         payload["ip"] = ip
     if port:
@@ -249,27 +255,51 @@ def ping(username, token, *, ip=None, port=None):
     return Frame.with_json(PING, payload)
 
 
-def encode_message(envelope, token):
-    """Encode a ``MSG`` payload: the envelope plus the sender's peer token."""
-    if not isinstance(token, str) or not token:
-        raise ProtocolError("a peer token is required for a message")
-    return json.dumps(
-        {"envelope": envelope, "token": token}, separators=(",", ":")
-    ).encode("utf-8")
+def encode_message(sender, message_id, sealed):
+    """Encode encrypted chat bytes, without an unencrypted peer token."""
+    if not isinstance(sender, str) or not sender:
+        raise ProtocolError("message sender is required")
+    if not isinstance(message_id, str) or not 8 <= len(message_id) <= 64:
+        raise ProtocolError("invalid message id")
+    try:
+        int(message_id, 16)
+    except ValueError as exc:
+        raise ProtocolError("invalid message id") from exc
+    if not isinstance(sealed, bytes) or len(sealed) < 29:
+        raise ProtocolError("sealed message is too short")
+    value = {"sender": sender, "id": message_id,
+             "sealed": base64.urlsafe_b64encode(sealed).decode("ascii")}
+    return json.dumps(value, separators=(",", ":")).encode("utf-8")
 
 
 def decode_message(payload):
-    """Return ``(envelope, token)`` from a ``MSG`` payload."""
+    """Return ``(sender, message_id, sealed_bytes)``."""
     try:
         value = json.loads(bytes(payload).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ProtocolError("message payload is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ProtocolError("message payload must be an object")
-    token = value.get("token")
-    if not isinstance(token, str) or not token:
-        raise ProtocolError("message payload is missing the peer token")
-    return validate_envelope(value.get("envelope")), token
+    sender = value.get("sender")
+    message_id = value.get("id")
+    sealed_text = value.get("sealed")
+    if not isinstance(sender, str) or not sender:
+        raise ProtocolError("message sender is required")
+    if not isinstance(message_id, str) or not 8 <= len(message_id) <= 64:
+        raise ProtocolError("invalid message id")
+    try:
+        int(message_id, 16)
+    except ValueError as exc:
+        raise ProtocolError("invalid message id") from exc
+    if not isinstance(sealed_text, str):
+        raise ProtocolError("encrypted message payload is missing")
+    try:
+        sealed = base64.b64decode(sealed_text, altchars=b"-_", validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ProtocolError("invalid encrypted message encoding") from exc
+    if len(sealed) < 29:
+        raise ProtocolError("encrypted message is too short")
+    return sender, message_id, sealed
 
 
 __all__ = [
@@ -280,6 +310,8 @@ __all__ = [
     "HEADER_SIZE",
     "HELLO",
     "HELLO_ACK",
+    "HELLO_CHALLENGE",
+    "HELLO_PROOF",
     "MAX_BODY_BYTES",
     "MAX_DATAGRAM",
     "MAX_PAYLOAD",

@@ -1,8 +1,7 @@
-"""Peer node: discovery, heartbeat and message delivery over UDP."""
+"""Peer node: use one selected transport for discovery and chat."""
 
-import http.client
-import json
 import logging
+import secrets
 import socket
 import sqlite3
 import threading
@@ -10,6 +9,8 @@ import time
 from collections import deque
 
 from . import protocol
+from .peer_crypto import canonical, decode_key, encode_key
+from .chat import CHAT_USERNAME_RE
 from .udp_transport import DEFAULT_CAPACITY, DEFAULT_RTO, ReliableChannel, UdpNode
 
 logger = logging.getLogger(__name__)
@@ -31,18 +32,18 @@ def _detect_local_ip():
 
 
 class PeerNode:
-    """Background UDP peer with heartbeat, retransmission and relay support."""
+    """Use UDP or raw Session for both discovery and peer messages."""
 
     def __init__(
         self,
         chat,
         *,
         username,
-        token,
-        verifier,
         role="peer",
         listen_ip="0.0.0.0",
         udp_port=0,
+        peer_transport="raw",
+        raw_port=9200,
         public_ip=None,
         tracker=None,
         heartbeat=HEARTBEAT_SECONDS,
@@ -51,13 +52,18 @@ class PeerNode:
         rto=DEFAULT_RTO,
         http_port=0,
         auth=None,
+        follow_tracker_keys=False,
+        require_claimed_identity=False,
+        file_store=None,
     ):
         if role not in ("peer", "tracker"):
             raise ValueError("role must be 'peer' or 'tracker'")
+        if peer_transport not in ("udp", "raw"):
+            raise ValueError("peer_transport must be udp or raw")
+        if peer_transport == "raw" and not 1 <= raw_port <= 65535:
+            raise ValueError("raw_port must be between 1 and 65535")
         self.chat = chat
         self.username = username
-        self.token = token
-        self.verifier = verifier
         self.role = role
         self.tracker = tuple(tracker) if tracker else None
         self.heartbeat_seconds = float(heartbeat)
@@ -65,19 +71,34 @@ class PeerNode:
         self.capacity = int(capacity)
         self.rto = float(rto)
         self.http_port = int(http_port or 0)
+        self.peer_transport = peer_transport
+        self.raw_port = int(raw_port) if peer_transport == "raw" else 0
+        if auth is None:
+            raise ValueError("X25519 peer identity is required")
         self.auth = auth
-        self._fallback = deque()
-        self._fallback_lock = threading.Lock()
-        self._fallback_running = False
-        self._pending_udp = {}
-
-        self.node = UdpNode(self._on_frame, listen_ip, udp_port)
+        self.file_store = file_store
+        self.follow_tracker_keys = bool(follow_tracker_keys)
+        self.require_claimed_identity = bool(require_claimed_identity)
+        self.crypto = auth.peer_crypto
+        self._challenges = {}
+        self._pending_tracker_key = None
+        self._last_hello = None
+        self._announced_peers = set()
         if public_ip:
             self.public_ip = public_ip
-        elif listen_ip in ("0.0.0.0", "::", ""):
-            self.public_ip = _detect_local_ip()
-        else:
+        elif listen_ip not in ("0.0.0.0", "::", ""):
             self.public_ip = listen_ip
+        elif peer_transport == "raw":
+            raise ValueError("raw mode requires --public-ip for the raw socket")
+        else:
+            self.public_ip = _detect_local_ip()
+
+        if peer_transport == "raw":
+            from .raw_chat import RawFrameNode
+            self.node = RawFrameNode(self._on_frame, self.public_ip,
+                                     self.raw_port, self.public_ip)
+        else:
+            self.node = UdpNode(self._on_frame, listen_ip, udp_port)
         self.public_port = int(self.node.port)
         self.address = (self.public_ip, self.public_port)
 
@@ -142,31 +163,20 @@ class PeerNode:
                 logger.exception("heartbeat failed")
 
     def tick(self):
+        if self.peer_transport == "raw":
+            self.chat.prune_peers()
+            return
         now = time.monotonic()
         for address, channel in list(self._channels.items()):
             retransmissions = channel.poll(now)
             for frame in retransmissions:
                 self._send(frame, address)
-                message_id = self._message_id(frame)
-                pending = self._pending_udp.get(message_id) if message_id else None
-                if pending is not None:
-                    self._pending_udp[message_id] = (
-                        address, pending[1], frame.seq
-                    )
             if channel.dead:
                 logger.warning("peer %s stopped responding", address)
-                for message_id, pending in list(self._pending_udp.items()):
-                    if pending[0] == address:
-                        with self._fallback_lock:
-                            self._fallback.append((
-                                "/internal/p2p/message", pending[1]
-                            ))
-                        self._pending_udp.pop(message_id, None)
                 with self._lock:
                     self._channels.pop(address, None)
         for address in list(self._outbox):
             self._flush(address)
-        self._flush_fallback()
         self.chat.prune_peers()
 
     def _flush(self, address):
@@ -181,13 +191,9 @@ class PeerNode:
                 if frame is None:
                     break
                 queue.popleft()
-                message_id = self._message_id(frame)
-                if message_id:
-                    pending = self._pending_udp.get(message_id)
-                    if pending is not None:
-                        self._pending_udp[message_id] = (
-                            address, pending[1], frame.seq
-                        )
+                # Only independently authenticated ACK frames may acknowledge
+                # traffic; do not trust the mutable piggyback header.
+                frame.ack = 0
                 self._send(frame, address)
                 self.stats["messages_sent"] += 1
             if not queue:
@@ -209,40 +215,45 @@ class PeerNode:
         return channel
 
     def _enqueue(self, address, payload):
-        try:
-            envelope, _token = protocol.decode_message(payload)
-        except protocol.ProtocolError:
-            envelope = None
-        with self._lock:
-            if envelope is not None:
-                self._pending_udp[envelope["id"]] = (
-                    address, envelope, time.monotonic()
-                )
-            self._outbox.setdefault(address, deque()).append(
-                (protocol.MSG, payload)
-            )
-        self._flush(address)
+        if self.peer_transport == "raw":
+            self._send(protocol.Frame(protocol.MSG, payload=payload), address)
+            self.stats["messages_sent"] += 1
+            return
+        while not self._stop.is_set():
+            with self._lock:
+                queue = self._outbox.setdefault(address, deque())
+                if len(queue) < 128:
+                    queue.append((protocol.MSG, payload))
+                    self._flush(address)
+                    return
+            self._stop.wait(self.tick_seconds)
+        raise OSError("P2P client stopped during file transfer")
 
     def send_hello(self):
         if self.tracker is None:
             return
-        frame = protocol.Frame.with_json(protocol.HELLO, {
+        self._last_hello = {
             "username": self.username, "ip": self.public_ip,
             "port": self.public_port, "http_port": self.http_port,
-            "token": self.token,
-        })
-        self._send(frame, self.tracker)
+            "public_key": self.crypto.public_text,
+        }
+        self._send(protocol.Frame.with_json(protocol.HELLO, self._last_hello),
+                   self.tracker)
 
     def send_ping(self):
         if self.tracker is None:
             return
-        self._send(
-            protocol.ping(
-                self.username, self.token, ip=self.public_ip,
-                port=self.public_port
-            ),
-            self.tracker,
-        )
+        tracker_key = self.crypto.pinned("tracker")
+        if tracker_key is None:
+            self.send_hello()
+            return
+        payload = {
+            "username": self.username, "ip": self.public_ip,
+            "port": self.public_port, "http_port": self.http_port,
+            "timestamp": int(time.time()), "nonce": secrets.token_hex(8),
+        }
+        payload["mac"] = self.crypto.mac(tracker_key, "ping", canonical(payload))
+        self._send(protocol.Frame.with_json(protocol.PING, payload), self.tracker)
 
     def _broadcast_envelope(self, envelope):
         targets = self.chat.peers(exclude=self.username)
@@ -254,32 +265,66 @@ class PeerNode:
                        )]
         if not targets:
             return 0
-        payload = self._encode_payload(envelope)
+        sent = 0
         for peer in targets:
+            if self.crypto.pinned(peer["username"]) is None:
+                continue
+            payload = self._encode_payload(envelope, peer["username"])
             self._enqueue((peer["ip"], int(peer["port"])), payload)
-        return len(targets)
+            sent += 1
+        return sent
+
+    def _send_to_peer(self, username, envelope):
+        address = self.chat.peer_address(username)
+        if address is not None and self.crypto.pinned(username) is not None:
+            self._enqueue(address, self._encode_payload(envelope, username))
+
+    def announce_channel(self, channel, recipient=None):
+        """Share a public channel with discovered peers."""
+        if channel["is_private"] or channel["owner_name"].casefold() != self.username.casefold():
+            return
+        envelope = {
+            "v": protocol.VERSION, "kind": "announce",
+            "id": protocol.new_message_id(), "channel": channel["id"],
+            "channel_name": channel["name"], "is_private": False,
+            "owner": channel["owner_name"], "from": self.username,
+            "to": recipient or "*", "body": "", "ts": channel["created_at"],
+        }
+        if recipient is None:
+            self._broadcast_envelope(envelope)
+        else:
+            self._send_to_peer(recipient, envelope)
+
+    def _announce_channels_to(self, username):
+        owner = self.chat.database.get_user(self.username)
+        if owner is None:
+            return
+        for channel in self.chat.list_channels(owner["id"]):
+            if channel["owner_name"].casefold() == self.username.casefold():
+                self.announce_channel(channel, recipient=username)
 
     def _relay(self, envelope):
         # Chat messages are never relayed through the tracker.
         return None
 
-    def broadcast(self, channel_id, body, *, message_id=None, sender=None):
-        """Store a message locally and fan it out over UDP."""
-        sender = sender or self.username
-        if sender != self.username:
-            raise PermissionError("this node can only send as its own user")
+    def _post_channel_message(self, channel_id, sender, body, **kwargs):
         owner = self.chat.database.get_user(sender)
         if owner is None:
             raise PermissionError("authenticated local user is required")
         self.chat.require_member(channel_id, owner)
-        message, created = self.chat.post_message(
+        return self.chat.post_message(channel_id, sender, body, **kwargs)
+
+    def broadcast(self, channel_id, body, *, message_id=None, sender=None):
+        """Store a message locally and fan it out to discovered peers."""
+        sender = sender or self.username
+        if sender != self.username:
+            raise PermissionError("this node can only send as its own user")
+        message, created = self._post_channel_message(
             channel_id, sender, body, message_id=message_id
         )
         if created:
             envelope = self._channel_envelope(message)
-            if not self._broadcast_envelope(envelope):
-                with self._fallback_lock:
-                    self._fallback.append(("/internal/p2p/message", envelope))
+            self._broadcast_envelope(envelope)
         return message
 
     def send_direct(self, channel_id, recipient, body, *, message_id=None,
@@ -288,23 +333,14 @@ class PeerNode:
         sender = sender or self.username
         if sender != self.username:
             raise PermissionError("this node can only send as its own user")
-        owner = self.chat.database.get_user(sender)
-        if owner is None:
-            raise PermissionError("authenticated local user is required")
-        self.chat.require_member(channel_id, owner)
-        message, created = self.chat.post_message(
+        message, created = self._post_channel_message(
             channel_id, sender, body, message_id=message_id, recipient=recipient
         )
         if not created:
             return message
-        address = self.chat.peer_address(recipient)
         envelope = self._channel_envelope(message)
         envelope["to"] = recipient
-        if address is None:
-            with self._fallback_lock:
-                self._fallback.append(("/internal/p2p/message", envelope))
-        else:
-            self._enqueue(address, self._encode_payload(envelope))
+        self._send_to_peer(recipient, envelope)
         return message
 
     def invite(self, channel_id, username):
@@ -316,12 +352,7 @@ class PeerNode:
             "from": channel["owner_name"], "to": username, "body": "",
             "ts": int(time.time()),
         }
-        address = self.chat.peer_address(username)
-        if address is None:
-            with self._fallback_lock:
-                self._fallback.append(("/internal/p2p/message", envelope))
-        else:
-            self._enqueue(address, self._encode_payload(envelope))
+        self._send_to_peer(username, envelope)
 
     def send_direct_message(self, message):
         envelope = {
@@ -330,12 +361,7 @@ class PeerNode:
             "to": message["recipient"], "body": message["body"],
             "ts": message["created_at"],
         }
-        address = self.chat.peer_address(message["recipient"])
-        if address is None:
-            with self._fallback_lock:
-                self._fallback.append(("/internal/p2p/message", envelope))
-        else:
-            self._enqueue(address, self._encode_payload(envelope))
+        self._send_to_peer(message["recipient"], envelope)
 
     def send_direct_chat(self, recipient, body, *, message_id=None, sender=None):
         sender = sender or self.username
@@ -348,106 +374,54 @@ class PeerNode:
             self.send_direct_message(message)
         return message
 
-    def _http_request(self, username, port, path, envelope):
-        record = self.chat.peer_record(username)
-        if record is None or not port or self.auth is None:
-            return None
-        body = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
-        timestamp = int(time.time())
-        signature = self.auth.sign_peer_request(self.username, timestamp, body)
-        headers = {
-            "Content-Type": "application/json",
-            "X-StreapRous-Peer": self.username,
-            "X-StreapRous-Time": str(timestamp),
-            "X-StreapRous-Signature": signature,
-        }
-        try:
-            connection = http.client.HTTPConnection(
-                record["ip"], int(port), timeout=2.0
-            )
-            connection.request("POST", path, body=body, headers=headers)
-            response = connection.getresponse()
-            if response.length is not None and response.length > 1024 * 1024:
-                connection.close()
-                return None
-            payload = response.read(1024 * 1024 + 1)
-            status = response.status
-            connection.close()
-            if status < 200 or status >= 300:
-                return None
-            return json.loads(payload.decode("utf-8")) if payload else {}
-        except (OSError, ValueError, json.JSONDecodeError):
-            return None
-        except http.client.HTTPException:
-            return None
+    def send_file(self, recipient, filename, contents):
+        """Store a byte payload and send it using the existing P2P file frames."""
+        if self.file_store is None:
+            raise ValueError("file transfer is unavailable")
+        transfer_id = protocol.new_message_id()
+        self.file_store.save_sent(transfer_id, self.username, recipient,
+                                  filename, contents)
+        self.send_saved_file(recipient, transfer_id)
+        return {"id": transfer_id, "name": self.file_store.clean_name(filename),
+                "size": len(contents), "recipient": recipient, "queued": True}
 
-    def _sync_from_peer(self, username):
-        record = self.chat.peer_record(username)
-        if record is None or not record.get("http_port"):
-            return
-        user = self.chat.database.get_user(self.username)
-        if user is None:
-            return
-        for channel in self.chat.list_channels(user["id"]):
-            if not channel["joined"] or (
-                channel["is_private"] and not channel["owner_name"]
-            ):
-                continue
-            response = self._http_request(
-                username, record["http_port"], "/internal/p2p/sync",
-                {"channel": channel["id"], "since": 0, "limit": 500},
-            )
-            if not isinstance(response, dict):
-                continue
-            for message in response.get("messages", []):
-                try:
-                    if channel["is_private"] and not self.chat.database.is_channel_member(
-                        channel["id"], message["sender"]
-                    ):
-                        continue
-                    self.chat.post_message(
-                        message["channel_id"], message["sender"],
-                        message["body"], message_id=message["id"],
-                        ts=message["created_at"],
-                    )
-                except (KeyError, ValueError):
-                    self.stats["malformed"] += 1
+    def send_saved_file(self, recipient, transfer_id):
+        """Read file chunks from disk, never queue the whole file in memory."""
+        import base64
+        import json
 
-    def _flush_fallback(self):
-        if self.auth is None or self._fallback_running:
-            return
-        with self._fallback_lock:
-            pending = list(self._fallback)
-            self._fallback.clear()
-            if pending:
-                self._fallback_running = True
-        if pending:
-            threading.Thread(
-                target=self._deliver_fallback, args=(pending,),
-                name=f"peer-fallback-{self.username}", daemon=True,
-            ).start()
-
-    def _deliver_fallback(self, pending):
-        try:
-            for path, envelope in pending:
-                targets = self.chat.peers(exclude=self.username)
-                if envelope.get("kind") in ("direct", "invite"):
-                    targets = [record for record in targets if
-                               record["username"].casefold() ==
-                               envelope.get("to", "").casefold()]
-                delivered = False
-                for record in targets:
-                    if record.get("http_port") and self._http_request(
-                        record["username"], record["http_port"], path, envelope
-                    ) is not None:
-                        delivered = True
-                        break
-                if not delivered:
-                    with self._fallback_lock:
-                        self._fallback.append((path, envelope))
-        finally:
-            with self._fallback_lock:
-                self._fallback_running = False
+        if self.file_store is None:
+            raise ValueError("file transfer is unavailable")
+        metadata = self.file_store.get(transfer_id, self.username)
+        if metadata is None or metadata["sender"] != self.username or metadata["recipient"] != recipient:
+            raise ValueError("file transfer not found")
+        address = self.chat.peer_address(recipient)
+        if address is None or self.crypto.pinned(recipient) is None:
+            raise ValueError("recipient is not online or trusted")
+        progress = -1
+        self.file_store.update_status(transfer_id, "sending")
+        for index, total, chunk in self.file_store.iter_send_chunks(
+                transfer_id, metadata["size"]):
+            if self._stop.is_set():
+                raise OSError("P2P client stopped during file transfer")
+            body = json.dumps({
+                "transfer": transfer_id, "name": metadata["name"],
+                "size": metadata["size"], "total": total, "index": index,
+                "sha256": metadata["sha256"],
+                "data": base64.b64encode(chunk).decode("ascii"),
+            }, separators=(",", ":"))
+            envelope = {
+                "v": protocol.VERSION, "kind": "file", "id": protocol.new_message_id(),
+                "channel": "direct", "from": self.username, "to": recipient,
+                "body": body, "ts": int(time.time()),
+            }
+            self._enqueue(address, self._encode_payload(envelope, recipient))
+            current = (index + 1) * 100 // total
+            if current != progress:
+                self.file_store.set_progress(transfer_id, current)
+                progress = current
+        self.file_store.update_status(transfer_id, "queued")
+        return metadata
 
     @staticmethod
     def _envelope(message, recipient=None, kind="channel"):
@@ -478,57 +452,113 @@ class PeerNode:
             })
         return envelope
 
-    def _encode_payload(self, envelope):
-        return protocol.encode_message(envelope, self.token)
+    def _encode_payload(self, envelope, recipient):
+        sealed = self.crypto.seal(recipient, envelope)
+        return protocol.encode_message(self.username, envelope["id"], sealed)
 
     def _decode_payload(self, payload):
-        return protocol.decode_message(payload)
+        sender, message_id, sealed = protocol.decode_message(payload)
+        try:
+            envelope = protocol.validate_envelope(
+                self.crypto.open(sender, self.username, sealed)
+            )
+        except (ValueError, TypeError) as exc:
+            raise protocol.ProtocolError("message authentication failed") from exc
+        if (envelope["from"].casefold() != sender.casefold() or
+                envelope["id"] != message_id):
+            raise protocol.ProtocolError("sender or message id mismatch")
+        return envelope, sender
+
+    def _matches_peer(self, username, address):
+        record = self.chat.peer_record(username)
+        return (record is not None and
+                (record["ip"], int(record["port"])) == address)
+
+    @staticmethod
+    def _ack_body(frame, sender):
+        return canonical({"ack": frame.ack, "window": frame.window,
+                          "sender": sender})
+
+    def _ack_frame(self, address, channel):
+        username = next((peer["username"] for peer in self.chat.peers()
+                         if (peer["ip"], int(peer["port"])) == address), None)
+        if username is None:
+            return None
+        frame = channel.acknowledgement()
+        body = self._ack_body(frame, self.username)
+        public = self.crypto.pinned(username)
+        if public is None:
+            return None
+        frame.payload = canonical({
+            "sender": self.username,
+            "mac": self.crypto.mac(public, "ack", body),
+        })
+        return frame
+
+    def _valid_ack(self, frame, address):
+        try:
+            data = frame.json_payload()
+            sender = data["sender"]
+            if not self._matches_peer(sender, address):
+                return False
+            public = self.crypto.pinned(sender)
+            body = self._ack_body(frame, sender)
+            return public is not None and self.crypto.verify_mac(
+                public, "ack", body, data.get("mac")
+            )
+        except (ValueError, KeyError, TypeError):
+            return False
 
     def _on_frame(self, frame, address):
         if address == self.node.address:
             return
+        if self.peer_transport == "raw":
+            if frame.seq or frame.type == protocol.MSG_ACK:
+                self.stats["rejected"] += 1
+                return
+            self._dispatch(frame, address)
+            return
         if frame.seq:
+            if frame.type != protocol.MSG:
+                self.stats["rejected"] += 1
+                return
+            try:
+                _envelope, sender = self._decode_payload(frame.payload)
+            except protocol.ProtocolError:
+                self.stats["rejected"] += 1
+                return
+            if not self._matches_peer(sender, address):
+                self.stats["rejected"] += 1
+                return
+            # An authenticated ciphertext does not authenticate mutable
+            # header ACKs and advertised window sizes.
+            frame.ack = 0
+            frame.window = 0
             with self._lock:
                 channel = self._channel(address)
-            delivered = channel.receive(frame)
-            self._send(channel.acknowledgement(), address)
+                delivered = channel.receive(frame)
+                acknowledgement = self._ack_frame(address, channel)
+            if acknowledgement is not None:
+                self._send(acknowledgement, address)
             for inner in delivered:
                 self._dispatch(inner, address)
             return
         if frame.type == protocol.MSG_ACK:
+            if not self._valid_ack(frame, address):
+                self.stats["rejected"] += 1
+                return
             with self._lock:
                 channel = self._channels.get(address)
-            if channel is not None:
-                channel.receive(frame)
-                for message_id, pending in list(self._pending_udp.items()):
-                    if pending[0] == address and pending[2] < frame.ack:
-                        self._pending_udp.pop(message_id, None)
-            return
-        if frame.type in (protocol.HELLO_ACK, protocol.PONG):
-            self._dispatch(frame, address)
-            if frame.type == protocol.HELLO_ACK:
-                try:
-                    peer_username = next(
-                        peer["username"] for peer in self.chat.peers()
-                        if (peer["ip"], peer["port"]) == address
-                    )
-                except StopIteration:
-                    return
-                self._sync_from_peer(peer_username)
+                if channel is not None:
+                    channel.receive(frame)
             return
         self._dispatch(frame, address)
-
-    @staticmethod
-    def _message_id(frame):
-        try:
-            envelope, _token = protocol.decode_message(frame.payload)
-        except protocol.ProtocolError:
-            return None
-        return envelope["id"]
 
     def _dispatch(self, frame, address):
         handler = {
             protocol.HELLO: self._handle_hello,
+            protocol.HELLO_CHALLENGE: self._handle_hello_challenge,
+            protocol.HELLO_PROOF: self._handle_hello_proof,
             protocol.PING: self._handle_ping,
             protocol.HELLO_ACK: self._handle_peer_list,
             protocol.PONG: self._handle_peer_list,
@@ -545,44 +575,120 @@ class PeerNode:
         except Exception:
             logger.exception("failed to handle %s from %s", frame.name, address)
 
-    def _authenticate(self, token):
-        username = self.verifier(token) if token else None
-        if not username:
-            self.stats["rejected"] += 1
-        return username
-
     def _handle_hello(self, frame, address):
-        payload = frame.json_payload()
-        username = self._authenticate(payload.get("token"))
-        if username is None:
-            self._send(protocol.Frame.with_json(protocol.AUTH_ERR, {"error": "bad token"}), address)
+        if self.role != "tracker":
             return
-        if payload.get("username") != username:
+        payload = frame.json_payload()
+        username = payload.get("username")
+        if (not isinstance(username, str) or
+                not CHAT_USERNAME_RE.fullmatch(username) or
+                username.casefold() == self.username.casefold()):
             self.stats["rejected"] += 1
             return
-        ip = payload.get("ip") or address[0]
-        port = payload.get("port")
-        self.chat.register_peer(
-            username, str(ip), port, payload.get("http_port", 0)
-        )
+        public = decode_key(payload.get("public_key"), 32)
+        pinned = self.crypto.pinned(username)
+        if self.require_claimed_identity and (
+                self.chat.database.get_user(username) is None or pinned is None):
+            self.stats["rejected"] += 1
+            return
+        if pinned is not None and pinned != public:
+            self.stats["rejected"] += 1
+            self._send(protocol.Frame.with_json(
+                protocol.AUTH_ERR, {"error": "peer key changed"}
+            ), address)
+            return
+        challenge = secrets.token_hex(16)
+        with self._lock:
+            now = time.monotonic()
+            self._challenges = {
+                addr: value for addr, value in self._challenges.items()
+                if now - value[3] < 30.0
+            }
+            self._challenges[address] = (username, public, payload, now, challenge)
+        self._send(protocol.Frame.with_json(protocol.HELLO_CHALLENGE, {
+            "public_key": self.crypto.public_text, "challenge": challenge,
+        }), address)
+
+    def _handle_hello_challenge(self, frame, address):
+        if self.role != "peer" or address != self.tracker:
+            return
+        payload = frame.json_payload()
+        public = decode_key(payload.get("public_key"), 32)
+        pinned = self.crypto.pinned("tracker")
+        if pinned is not None and pinned != public:
+            self.stats["rejected"] += 1
+            return
+        challenge = payload.get("challenge")
+        if not isinstance(challenge, str) or len(challenge) != 32:
+            self.stats["rejected"] += 1
+            return
+        if self._last_hello is None:
+            self.stats["rejected"] += 1
+            return
+        self._pending_tracker_key = public
+        self._send(protocol.Frame.with_json(protocol.HELLO_PROOF, {
+            "username": self.username,
+            "challenge": challenge,
+            "mac": self.crypto.mac(public, "hello-proof",
+                                   challenge.encode() + canonical(self._last_hello)),
+        }), address)
+
+    def _handle_hello_proof(self, frame, address):
+        if self.role != "tracker":
+            return
+        with self._lock:
+            pending = self._challenges.pop(address, None)
+        if pending is None:
+            self.stats["rejected"] += 1
+            return
+        username, public, hello, created, challenge = pending
+        data = frame.json_payload()
+        if (time.monotonic() - created > 30.0 or
+                data.get("username") != username or
+                data.get("challenge") != challenge or
+                not self.crypto.verify_mac(
+                    public, "hello-proof", challenge.encode() + canonical(hello),
+                    data.get("mac")
+                )):
+            self.stats["rejected"] += 1
+            return
+        if not self.crypto.pin(username, public):
+            self.stats["rejected"] += 1
+            return
+        ip = hello.get("ip") or address[0]
+        self.chat.register_peer(username, str(ip), hello.get("port"),
+                                hello.get("http_port", 0))
         self.stats["hellos"] += 1
-        self._send(self._peer_list_frame(protocol.HELLO_ACK), address)
+        self._send(self._peer_list_frame(protocol.HELLO_ACK, public), address)
 
     def _handle_ping(self, frame, address):
-        payload = frame.json_payload()
-        username = self._authenticate(payload.get("token"))
-        if username is None:
+        if self.role != "tracker":
             return
-        # Prefer the advertised address: the source address is often 127.0.0.1
-        # for a local send and would create a second row for the same peer.
+        payload = frame.json_payload()
+        username = payload.get("username")
+        public = self.crypto.pinned(username)
+        try:
+            timestamp = int(payload.get("timestamp"))
+        except (ValueError, TypeError):
+            self.stats["rejected"] += 1
+            return
+        nonce = payload.get("nonce")
+        if (public is None or not isinstance(nonce, str) or len(nonce) != 16 or
+                abs(int(time.time()) - timestamp) > 60):
+            self.stats["rejected"] += 1
+            return
+        body = dict(payload)
+        mac = body.pop("mac", None)
+        if not self.crypto.verify_mac(public, "ping", canonical(body), mac):
+            self.stats["rejected"] += 1
+            return
         ip = payload.get("ip") or address[0]
         port = payload.get("port") or self._port_for(username)
         if port:
-            self.chat.register_peer(
-                username, str(ip), port, payload.get("http_port", 0)
-            )
+            self.chat.register_peer(username, str(ip), port,
+                                    payload.get("http_port", 0))
         self.stats["pings"] += 1
-        self._send(self._peer_list_frame(protocol.PONG), address)
+        self._send(self._peer_list_frame(protocol.PONG, public), address)
 
     def _port_for(self, username):
         for peer in self.chat.peers():
@@ -590,68 +696,151 @@ class PeerNode:
                 return int(peer["port"])
         return 0
 
-    def _peer_list_frame(self, frame_type):
-        peers = [
-            {"username": peer["username"], "ip": peer["ip"],
-             "port": peer["port"], "http_port": peer["http_port"]}
-            for peer in self.chat.peers(exclude=self.username)
-        ]
-        return protocol.Frame.with_json(frame_type, {"peers": peers})
+    def _peer_list_frame(self, frame_type, recipient_public):
+        peers = []
+        for peer in self.chat.peers(exclude=self.username):
+            key = self.crypto.pinned(peer["username"])
+            if key is not None:
+                peers.append({
+                    "username": peer["username"], "ip": peer["ip"],
+                    "port": peer["port"], "http_port": peer["http_port"],
+                    "public_key": encode_key(key),
+                })
+        payload = {"peers": peers, "public_key": self.crypto.public_text,
+                   "timestamp": int(time.time()), "nonce": secrets.token_hex(8)}
+        payload["mac"] = self.crypto.mac(recipient_public, "peer-list",
+                                         canonical(payload))
+        return protocol.Frame.with_json(frame_type, payload)
 
     def _handle_peer_list(self, frame, address):
+        if self.role != "peer" or address != self.tracker:
+            return
         payload = frame.json_payload()
+        public = decode_key(payload.get("public_key"), 32)
+        expected = self.crypto.pinned("tracker") or self._pending_tracker_key
+        if expected is None or public != expected:
+            self.stats["rejected"] += 1
+            return
+        try:
+            timestamp = int(payload["timestamp"])
+        except (TypeError, ValueError, KeyError):
+            self.stats["rejected"] += 1
+            return
+        body = dict(payload)
+        mac = body.pop("mac", None)
+        if (abs(int(time.time()) - timestamp) > 60 or
+                not self.crypto.verify_mac(public, "peer-list", canonical(body), mac)):
+            self.stats["rejected"] += 1
+            return
+        if not self.crypto.pin("tracker", public):
+            self.stats["rejected"] += 1
+            return
+        self._pending_tracker_key = None
         for peer in payload.get("peers") or []:
             if not isinstance(peer, dict):
                 continue
             username = peer.get("username")
-            if not username or username.lower() == self.username.lower():
+            if not isinstance(username, str) or username.casefold() == self.username.casefold():
                 continue
             try:
-                self.chat.register_peer(
-                    username, peer.get("ip", ""), peer.get("port"),
-                    peer.get("http_port", 0),
-                )
-            except Exception:
-                continue
+                key = decode_key(peer.get("public_key"), 32)
+                if not self.crypto.pin(username, key):
+                    if self.follow_tracker_keys:
+                        self.chat.database.authorize_peer_key(username, key)
+                    else:
+                        self.stats["rejected"] += 1
+                        continue
+                self.chat.register_peer(username, peer.get("ip", ""),
+                                        peer.get("port"), peer.get("http_port", 0))
+                if username.casefold() not in self._announced_peers:
+                    self._announced_peers.add(username.casefold())
+                    self._announce_channels_to(username)
+            except (ValueError, TypeError):
+                self.stats["malformed"] += 1
 
     def _handle_message(self, frame, address):
-        envelope, token = self._decode_payload(frame.payload)
-        username = self._authenticate(token)
-        if username is None or envelope["from"].casefold() != username.casefold():
+        try:
+            envelope, username = self._decode_payload(frame.payload)
+        except protocol.ProtocolError:
+            self.stats["rejected"] += 1
+            return
+        if not self._matches_peer(username, address):
             self.stats["rejected"] += 1
             return
         recipient = envelope.get("to") or "*"
-        kind = envelope.get("kind", "channel")
         if recipient != "*" and recipient.casefold() != self.username.casefold():
             return
-        if kind == "direct":
+
+        kind = envelope.get("kind", "channel")
+        if kind == "file":
+            self._receive_file(envelope)
+        elif kind == "direct":
             _message, created = self.chat.receive_direct_message(
                 envelope["from"], recipient, envelope["body"],
                 message_id=envelope["id"], ts=envelope["ts"],
             )
             self.stats["messages_received" if created else "duplicates"] += 1
+        elif kind == "announce":
+            self._receive_announcement(envelope, username)
+        elif kind == "invite":
+            self._receive_invite(envelope)
+        else:
+            self._receive_channel_message(envelope, recipient)
+
+    def _receive_file(self, envelope):
+        if self.file_store is None:
+            self.stats["rejected"] += 1
             return
-        if kind == "invite":
-            channel = self.chat.database.get_channel(envelope["channel"])
-            if channel is None:
-                try:
-                    channel = self.chat.database.create_channel(
-                        envelope["channel"], envelope["channel_name"], None,
-                        int(envelope["ts"]),
-                        is_private=envelope.get("is_private", True),
-                        owner_name=envelope.get("owner") or envelope["from"],
-                    )
-                except sqlite3.IntegrityError:
-                    channel = self.chat.database.get_channel(envelope["channel"])
-            if channel is None or channel["owner_name"].casefold() != \
-                    (envelope.get("owner") or envelope["from"]).casefold():
+        try:
+            if self.file_store.receive_chunk(envelope):
+                self.stats["messages_received"] += 1
+        except (ValueError, OSError) as exc:
+            logger.warning("file chunk rejected: %s", exc)
+            self.stats["rejected"] += 1
+
+    def _receive_announcement(self, envelope, username):
+        name = envelope.get("channel_name")
+        owner = envelope.get("owner")
+        if (envelope.get("is_private") or not isinstance(name, str)
+                or not name or not isinstance(owner, str)
+                or owner.casefold() != username.casefold()):
+            self.stats["rejected"] += 1
+            return
+        channel = self.chat.database.get_channel(envelope["channel"])
+        if channel is None:
+            try:
+                channel = self.chat.database.create_channel(
+                    envelope["channel"], name, None, envelope["ts"],
+                    is_private=False, owner_name=owner,
+                )
+            except sqlite3.IntegrityError:
                 self.stats["rejected"] += 1
                 return
-            self.chat.database.add_channel_member(
-                channel["id"], self.username, int(time.time())
-            )
-            return
+        if (channel["name"] != name or channel["is_private"]
+                or channel["owner_name"].casefold() != owner.casefold()):
+            self.stats["rejected"] += 1
 
+    def _receive_invite(self, envelope):
+        channel = self.chat.database.get_channel(envelope["channel"])
+        if channel is None:
+            try:
+                channel = self.chat.database.create_channel(
+                    envelope["channel"], envelope["channel_name"], None,
+                    int(envelope["ts"]),
+                    is_private=envelope.get("is_private", True),
+                    owner_name=envelope.get("owner") or envelope["from"],
+                )
+            except sqlite3.IntegrityError:
+                channel = self.chat.database.get_channel(envelope["channel"])
+        if channel is None or channel["owner_name"].casefold() != \
+                (envelope.get("owner") or envelope["from"]).casefold():
+            self.stats["rejected"] += 1
+            return
+        self.chat.database.add_channel_member(
+            channel["id"], self.username, int(time.time())
+        )
+
+    def _receive_channel_message(self, envelope, recipient):
         channel = self.chat.database.get_channel(envelope["channel"])
         if channel is None:
             try:
@@ -689,11 +878,11 @@ class PeerNode:
         self.stats["messages_received" if created else "duplicates"] += 1
 
     def _handle_bye(self, frame, address):
-        with self._lock:
-            self._channels.pop(address, None)
+        # An unauthenticated BYE must not reset an established channel.
+        return
 
     def _handle_auth_error(self, frame, address):
-        logger.warning("peer %s rejected our token", address)
+        logger.warning("peer %s rejected our identity", address)
 
     def status(self):
         return {
@@ -701,5 +890,7 @@ class PeerNode:
             "role": self.role,
             "address": self.address,
             "tracker": self.tracker,
+            "peer_transport": self.peer_transport,
+            "raw_port": self.raw_port,
             "peers": len(self.chat.peers()),
         }
