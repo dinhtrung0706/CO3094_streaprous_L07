@@ -2,12 +2,12 @@ import base64
 import json
 import time
 import unittest
-from unittest import mock
 
 from daemon.auth import AuthService
 from daemon.database import Database
 from daemon.errors import BadRequest
 from daemon.httpadapter import HttpAdapter
+from daemon.peer_crypto import PeerCrypto
 from daemon.request import Request
 from daemon.response import Response
 from daemon.streaprous import StreapRous
@@ -210,39 +210,48 @@ class AuthTests(unittest.TestCase):
         self.assertIs(installed, self.service)
         self.assertEqual(len(self.app.routes.before_request_hooks), hook_count)
 
-    def test_peer_token_round_trip(self):
-        token = self.service.issue_peer_token("alice")
-        self.assertEqual(self.service.verify_peer_token(token), "alice")
+    def test_peer_identity_persists_with_its_database(self):
+        identity = self.service.peer_crypto.public
 
-    def test_peer_token_rejects_tampering(self):
-        token = self.service.issue_peer_token("alice")
-        payload, signature = token.split(".")
-        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-        tampered = base64.urlsafe_b64encode(
-            raw.replace(b"alice", b"alicf")
-        ).rstrip(b"=").decode("ascii")
-        self.assertIsNone(self.service.verify_peer_token(f"{tampered}.{signature}"))
-        self.assertIsNone(self.service.verify_peer_token(token + "x"))
+        reopened = PeerCrypto(self.database)
 
-    def test_peer_token_rejects_garbage(self):
-        for value in ("", "no-dot", "a.b", None, 42):
-            with self.subTest(value=value):
-                self.assertIsNone(self.service.verify_peer_token(value))
+        self.assertEqual(reopened.public, identity)
 
-    def test_peer_token_expires(self):
-        token = self.service.issue_peer_token("alice", ttl=60)
-        future = time.time() + 3600
-        with mock.patch("daemon.auth.time.time", return_value=future):
-            self.assertIsNone(self.service.verify_peer_token(token))
+    def test_peer_key_pin_rejects_silent_identity_replacement(self):
+        self.assertTrue(self.service.peer_crypto.pin("alice", b"a" * 32))
+        self.assertFalse(self.service.peer_crypto.pin("alice", b"b" * 32))
+        self.assertEqual(self.service.peer_crypto.pinned("alice"), b"a" * 32)
 
-    def test_peer_token_is_bound_to_the_signing_key(self):
+    def test_peer_request_signature_uses_mutually_pinned_identities(self):
+        other_database = Database(":memory:")
+        self.addCleanup(other_database.close)
         other = AuthService(
-            Database(":memory:"),
-            signing_key=b"a completely different signing key!!",
+            other_database,
+            signing_key=b"another test session key with enough entropy",
             password_iterations=1000,
         )
-        self.addCleanup(other.database.close)
-        self.assertIsNone(other.verify_peer_token(self.service.issue_peer_token("alice")))
+        self.service.peer_crypto.pin("bob", other.peer_crypto.public)
+        other.peer_crypto.pin("alice", self.service.peer_crypto.public)
+        timestamp = int(time.time())
+        body = b'{"from":"alice","body":"hello"}'
+        path = "/internal/p2p/message"
+
+        signature = self.service.sign_peer_request(
+            "alice", timestamp, body, "bob", path
+        )
+
+        self.assertTrue(other.verify_peer_request(
+            "alice", timestamp, signature, body, path
+        ))
+        self.assertFalse(other.verify_peer_request(
+            "mallory", timestamp, signature, body, path
+        ))
+        self.assertFalse(other.verify_peer_request(
+            "alice", timestamp, signature, body + b"!", path
+        ))
+        self.assertFalse(other.verify_peer_request(
+            "alice", timestamp, signature, body, "/internal/p2p/sync"
+        ))
 
 
 

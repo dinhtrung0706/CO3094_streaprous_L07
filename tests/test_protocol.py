@@ -4,7 +4,9 @@ import struct
 import unittest
 
 from daemon import protocol
+from daemon.database import Database
 from daemon.protocol import Frame, ProtocolError
+from daemon.peer_crypto import PeerCrypto
 
 
 class HeaderTests(unittest.TestCase):
@@ -139,12 +141,16 @@ class EnvelopeTests(unittest.TestCase):
 
 class ConstructorTests(unittest.TestCase):
     def test_hello_frame(self):
-        decoded = protocol.decode_frame(protocol.hello("alice", "127.0.0.1", 9101, "token-value").encode())
+        public_key = "A" * 43
+        decoded = protocol.decode_frame(
+            protocol.hello("alice", "127.0.0.1", 9101, public_key).encode()
+        )
         payload = decoded.json_payload()
         self.assertEqual(decoded.type, protocol.HELLO)
         self.assertEqual(payload["username"], "alice")
         self.assertEqual(payload["port"], 9101)
-        self.assertEqual(payload["token"], "token-value")
+        self.assertEqual(payload["public_key"], public_key)
+        self.assertNotIn("token", payload)
 
     def test_ping_frame(self):
         decoded = protocol.decode_frame(
@@ -156,25 +162,41 @@ class ConstructorTests(unittest.TestCase):
         self.assertEqual(payload["ip"], "127.0.0.1")
         self.assertEqual(payload["port"], 9102)
 
-    def test_message_frame_carries_envelope_and_token(self):
+    def test_message_frame_carries_encrypted_payload_without_token(self):
+        alice_database = Database(":memory:")
+        bob_database = Database(":memory:")
+        self.addCleanup(alice_database.close)
+        self.addCleanup(bob_database.close)
+        alice = PeerCrypto(alice_database)
+        bob = PeerCrypto(bob_database)
+        alice.pin("bob", bob.public)
+        bob.pin("alice", alice.public)
         envelope = protocol.message_envelope(channel="c", sender="a", body="hi")
+        envelope["from"] = "alice"
+        sealed = alice.seal("bob", envelope)
         frame = Frame(
-            protocol.MSG, 5, payload=protocol.encode_message(envelope, "peer-token")
+            protocol.MSG,
+            5,
+            payload=protocol.encode_message("alice", envelope["id"], sealed),
         )
         decoded = protocol.decode_frame(frame.encode())
         self.assertEqual(decoded.seq, 5)
-        parsed_envelope, token = protocol.decode_message(decoded.payload)
-        self.assertEqual(parsed_envelope["body"], "hi")
-        self.assertEqual(token, "peer-token")
+        sender, message_id, parsed_sealed = protocol.decode_message(decoded.payload)
+        self.assertEqual(sender, "alice")
+        self.assertEqual(message_id, envelope["id"])
+        self.assertNotIn(b"hi", decoded.payload)
+        self.assertEqual(bob.open("alice", "bob", parsed_sealed), envelope)
 
-    def test_message_requires_a_token(self):
-        envelope = protocol.message_envelope(channel="c", sender="a", body="hi")
+    def test_message_requires_a_valid_encrypted_payload(self):
         with self.assertRaises(ProtocolError):
-            protocol.encode_message(envelope, "")
+            protocol.encode_message("alice", "a" * 32, b"too short")
 
-    def test_decode_message_rejects_missing_token(self):
+    def test_decode_message_rejects_missing_encrypted_payload(self):
         with self.assertRaises(ProtocolError):
-            protocol.decode_message(b'{"envelope": {"id": "a"}}')
+            protocol.decode_message(
+                b'{"sender":"alice","id":"aaaaaaaaaaaaaaaa",'
+                b'"token":"legacy-token"}'
+            )
 
     def test_type_names_are_stable(self):
         self.assertEqual(protocol.TYPE_NAMES[protocol.MSG], "MSG")
